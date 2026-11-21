@@ -121,7 +121,6 @@ START → parse_input ──┬─ create / provide_info → merge_draft ─┬�
                       ├─ confirm_yes → delete_project ────────────────────────────────────┤
                       ├─ confirm_no  → cancel_delete ─────────────────────────────────────┤
                       ├─ delete_all           → start_delete_all ─────────────────────────┤
-                      ├─ delete_all_yes       → confirm_delete_all ───────────────────────┤
                       ├─ delete_all_confirmed → delete_all_projects ──────────────────────┤
                       ├─ delete_all_no        → cancel_delete_all ────────────────────────┤
                       ├─ cancel      → cancel_pending ────────────────────────────────────┤
@@ -134,8 +133,9 @@ START → parse_input ──┬─ create / provide_info → merge_draft ─┬�
 - *Per turn:* `user_input`, `parsed`, `route`, `op`, `target_id`, `changes`, `notes`,
   `response`.
 - *Remembered between turns:* `draft` (the half-built project), `awaiting` (`fields`,
-  `clarify_field`, `which_project` or `confirm_delete`) and `pending_op` (e.g. the
-  candidates for "which one?", or the value waiting for "project name or customer?"). These are kept by LangGraph's `InMemorySaver` checkpointer under one `thread_id`.
+  `clarify_field`, `which_project`, `confirm_delete` or `confirm_delete_all`) and
+  `pending_op` (e.g. the candidates for "which one?", or the value waiting for "project
+  name or customer?"). These are kept by LangGraph's `InMemorySaver` checkpointer under one `thread_id`.
 
 **Multi-turn slot filling:**
 1. `parse_input` sends your message to the LLM along with context: the current draft and
@@ -327,7 +327,9 @@ Type "delete all" to confirm. Anything else cancels.
 OK, nothing was deleted. (Confirming needs the exact words "delete all".)
 
 > delete all projects
-...
+This will permanently delete ALL 2 projects:
+1. Alpha — customer: Acme
+2. Beta — customer: Globex · status: active
 Type "delete all" to confirm. Anything else cancels.
 
 > delete all
