@@ -1,0 +1,3692 @@
+ ▐▛███▛█   Claude Code v2.1.330
+▝▜██████▀  Opus 5.5 · Claude Pro
+ ▝▝   ▝▝   ~/Documents/console-project-agent
+
+
+❯ /guided-reasoning I'm building a standalone Python 3.10+ console application  
+using LangChain and LangGraph. Users interact via stdin/stdout in a continuous  
+loop until typing `quit` or `exit`, and project data is saved to a local JSON   
+file (`projects.json`).                                                         
+                                                                                
+Core features:                                                                  
+- Create a project from natural language (`project_name` and `customer` are     
+required; if either is missing, ask follow-up questions across turns before     
+saving)                                                                         
+- Support optional fields (`start_date`, `location`, `status`, `notes`)         
+- List all projects (handling an empty list clearly)                            
+- Bonus actions: get, update, and delete a project                              
+- LLM Provider: Cloud API (OpenRouter) configured via API key in .env           
+- Handle unclear input and runtime errors gracefully without crashing           
+                                                                                
+Before writing any code, propose a clean, modular directory structure with a    
+`requirements.txt` file at the root, our LangGraph state & node flow (including 
+how multi-turn slot filling works), and a step-by-step build order for us to    
+review.                                                                         
+
+⏺ Guided Reasoning Progress:
+  - [ ] Phase 1: Three clarifying questions (STOP for answers)
+  - [ ] Phase 2: Step-by-step breakdown (what / how / best outcome)
+  - [ ] Phase 3: Newbie explanation with concrete examples
+  - [ ] Phase 4: Options + pros/cons/tradeoffs + recommendation
+  - [ ] Phase 5: Research gate — research first? (STOP for decision)
+  - [ ] Phase 6: Self-eval errors/assumptions → best plan → Proceed?
+  - [ ] Execute best plan (only after user says yes / proceed)
+
+  Phase 1: Three clarifying questions
+
+  Your brief already covers the stack, the storage, the fields and the features.
+  These three questions are the ones whose answers would change the state
+  design and node flow the most.
+
+  1. How should a user point to a project when they get, update or delete it?
+  Why it matters: This decides the record format in projects.json, and what the
+  app does when two projects look alike.
+  - a) By name only. Names must be unique, ignoring case ("Website Redesign" and
+    "website redesign" count as the same name). Creating a duplicate gets a
+    warning.
+  - b) By an auto-generated short ID (e.g. P-003). Names can repeat. list shows
+    the IDs.
+  - c) Both. Every project gets an ID, but users can refer to it by name. If a
+    name matches more than one project, the app asks which one they mean.
+  - Other: …
+
+  2. While the app is waiting for a missing required field, what should happen 
+  if the user says something unrelated?
+  Example: the app asks "Who is the customer?" and the user types "actually,
+  list my projects."
+  Why it matters: This is the core of multi-turn slot filling. Slot filling
+  means collecting the required pieces over several turns before saving. Your
+  answer sets how much routing logic sits in front of that loop.
+  - a) Strict: treat every reply as the answer to the question. Only cancel gets
+    out.
+  - b) Flexible: if the reply is clearly a new command, set the half-finished
+    draft aside, run the command, then remind the user about the draft.
+  - c) Flexible and discard: a new command throws the draft away, with a short
+    notice.
+  - Other: …
+
+  3. Which OpenRouter model should be the default? Should the build include 
+  offline tests?
+  Why it matters: I plan to use the model's structured output, meaning it
+  returns filled-in fields instead of free text. Cheap or free models often
+  break that format, so the choice changes how much fallback code we need.
+  Offline tests mean a fake LLM, which changes how the modules are split.
+  - a) A reliable, low-cost model with good tool calling (e.g.
+    openai/gpt-4o-mini or a Claude Haiku model), set through .env, plus pytest
+    tests that use a fake LLM.
+  - b) The same model, no tests. Just a working app with a README.
+  - c) A free OpenRouter model. This means more defensive parsing and retries.
+  - Other: …
+
+  Reply with answers 1–3 (or "use defaults") and I will continue to the plan.
+  The defaults are 1c, 2b and 3a.
+
+✻ Cogitated for 19s · done 3:21 PM
+
+❯ 1. C                                                                          
+  2. B                                                                          
+  3. A                                                                          
+
+⏺ Guided Reasoning Progress:
+  - [x] Phase 1: Three clarifying questions → 1c, 2b, 3a
+  - [x] Phase 2: Step-by-step breakdown
+  - [x] Phase 3: Newbie explanation
+  - [x] Phase 4: Options + recommendation
+  - [ ] Phase 5: Research gate (STOP for decision)
+  - [ ] Phase 6: Self-eval → best plan → Proceed?
+  - [ ] Execute
+
+  Here is what your answers lock in:
+  - 1c: Every project gets an ID like P-001. Users can also refer to a project
+    by name. If a name matches more than one project, the app asks which one.
+  - 2b: If the user types a new command while a draft is half-filled, the app
+    runs the command, keeps the draft, and reminds them about it.
+  - 3a: The model is set in .env, defaulting to openai/gpt-4o-mini. Tests use a
+    fake LLM, so they run offline.
+
+  ---
+
+  Proposed design (for review)
+
+  Directory structure
+
+  console-project-agent/
+  ├── requirements.txt
+  ├── .env.example              # OPENROUTER_API_KEY=, OPENROUTER_MODEL=, 
+  PROJECTS_FILE=
+  ├── README.md
+  ├── main.py                   # entry point: `python main.py`
+  ├── project_agent/
+  │   ├── __init__.py
+  │   ├── config.py             # loads .env, checks the key exists, holds 
+  settings
+  │   ├── llm.py                # builds the OpenRouter chat model + the input 
+  parser
+  │   ├── models.py             # Pydantic: Project, ParsedInput (intent + 
+  fields)
+  │   ├── storage.py            # ProjectRepository: load/save/find in 
+  projects.json
+  │   ├── formatting.py         # turns projects into readable console text
+  │   ├── cli.py                # the input loop (quit/exit, Ctrl+C, catch-all 
+  errors)
+  │   └── graph/
+  │       ├── state.py          # AgentState definition
+  │       ├── prompts.py        # system prompt for parsing
+  │       ├── nodes.py          # one function per node
+  │       ├── routing.py        # functions that choose the next node
+  │       └── builder.py        # wires nodes + edges, compiles with a 
+  checkpointer
+  └── tests/
+      ├── fakes.py              # FakeParser: returns scripted ParsedInput, no 
+  network
+      ├── test_storage.py
+      ├── test_slot_filling.py
+      └── test_flows.py         # list/get/update/delete/disambiguation/errors
+
+  Why it's split this way: storage.py and models.py don't use the LLM at all, so
+  they're easy to test. The graph only talks to the LLM through one "parser"
+  object, so the tests can swap in a fake one.
+
+  requirements.txt (versions pinned after research)
+
+  langgraph
+  langchain-core
+  langchain-openai      # OpenRouter is OpenAI-compatible, so we point base_url 
+  at it
+  pydantic>=2
+  python-dotenv
+  pytest
+
+  Data format in projects.json
+
+  {
+    "next_id": 4,
+    "projects": [
+      {"id": "P-001", "project_name": "Website Redesign", "customer": "Acme",
+       "start_date": "2026-12-01", "location": "Bangkok", "status": "planned",
+       "notes": null, "created_at": "...", "updated_at": "..."}
+    ]
+  }
+
+  LangGraph state
+
+  class AgentState(TypedDict):
+      # this turn only (reset every turn)
+      user_input: str
+      parsed: ParsedInput | None        # intent, fields, project_ref, choice
+      response: str
+      # remembered across turns
+      draft: dict | None                # half-built project
+      awaiting: Literal["fields", "which_project"] | None
+      pending_op: dict | None           # e.g. {"op": "update", "changes": 
+  {...}, "candidates": ["P-001","P-004"]}
+
+  ParsedInput is what the LLM returns, using structured output (the model fills
+  a fixed form instead of writing free text):
+  intent ∈ {create, provide_info, list, get, update, delete, choose, cancel, 
+  help, unclear}, plus the optional fields fields, project_ref and choice.
+
+  Node flow
+
+  START → parse_input ──route──┬─ create / provide_info ─→ merge_draft → 
+  check_required ─┬─ missing → ask_missing → finalize
+                               │                                                
+           └─ complete → save_project → finalize
+                               ├─ list ─────────────────→ list_projects 
+  ──────────────────────────────→ finalize
+                               ├─ get/update/delete ────→ resolve_project ─┬─ 0 
+  matches → not_found ───→ finalize
+                               │                                           ├─ 2+
+  matches → ask_which ──→ finalize
+                               │                                           └─ 1 
+  match → do_get/do_update/do_delete → finalize
+                               ├─ choose (answer to "which one?") → 
+  resolve_project (from candidates)
+                               ├─ cancel ───────────────→ clear_pending 
+  ──────────────────────────────→ finalize
+                               └─ unclear / help ───────→ clarify 
+  ────────────────────────────────────→ finalize
+  finalize → END     (adds the "you still have an unfinished draft" reminder 
+  when needed, per 2b)
+
+  How multi-turn slot filling works
+
+  - Each user line is one graph run. A checkpointer saves the state between
+    runs: it's LangGraph's built-in memory, and we use one fixed thread_id.
+    That's how the draft survives from one turn to the next.
+  - parse_input gives the LLM the current draft and awaiting value. So when the
+    app has just asked for the customer and the user types "Acme", the LLM can
+    classify it as provide_info with customer="Acme".
+  - merge_draft adds the new fields to the draft without wiping existing ones.
+    check_required looks for project_name and customer using plain code, not the
+    LLM, so it can't be talked out of the rule.
+  - Fixed words like quit/exit (handled in cli.py) and cancel are matched
+    exactly before the LLM is called. They work even if the API is down.
+
+  Example:
+  > new project for the Bangkok office starting Dec 1
+    Got it. What's the project name, and who is the customer?
+  > it's called Office Fit-out
+    Thanks. Who is the customer?
+  > list projects
+    No projects yet.
+    (You have an unfinished draft "Office Fit-out", still missing: customer. 
+  Reply with it or type cancel.)
+  > Siam Corp
+    Saved P-001 "Office Fit-out" for Siam Corp (start 2026-12-01, Bangkok).
+
+  Error handling
+
+  ┌─────────────────────┬───────────────────────────────────────────────────┐
+  │       Failure       │                     Behaviour                     │
+  ├─────────────────────┼───────────────────────────────────────────────────┤
+  │ Missing API key     │ Clear message at startup, exit cleanly            │
+  ├─────────────────────┼───────────────────────────────────────────────────┤
+  │ LLM timeout or      │ One retry, then "I couldn't reach the model,      │
+  │ network error       │ please try again." The draft is kept.             │
+  ├─────────────────────┼───────────────────────────────────────────────────┤
+  │ LLM output fails    │ Treated as unclear, and the app shows example     │
+  │ validation          │ commands                                          │
+  ├─────────────────────┼───────────────────────────────────────────────────┤
+  │ projects.json       │ Created empty                                     │
+  │ missing             │                                                   │
+  ├─────────────────────┼───────────────────────────────────────────────────┤
+  │ projects.json       │ Renamed to .bak, start empty, show a warning      │
+  │ corrupted           │                                                   │
+  ├─────────────────────┼───────────────────────────────────────────────────┤
+  │                     │ Written to a temp file first, then swapped in     │
+  │ Writes              │ with os.replace, so a crash can't leave a         │
+  │                     │ half-written file                                 │
+  ├─────────────────────┼───────────────────────────────────────────────────┤
+  │ Anything else       │ cli.py catches it, prints a short message and     │
+  │                     │ keeps the loop running                            │
+  └─────────────────────┴───────────────────────────────────────────────────┘
+
+  ---
+
+  Phase 2: Build order
+
+  Step 1: Skeleton and config
+
+  - What it involves: The folders, requirements.txt, .env.example, config.py.
+  - How to do it: Create a virtual environment, install the packages, and load
+    .env with python-dotenv.
+  - Best expected outcome: python main.py prints a welcome line, or a clear
+    "missing OPENROUTER_API_KEY" message.
+
+  Step 2: Models and storage (no LLM)
+
+  - What it involves: The Project model, the ID counter, and ProjectRepository
+    (add/list/find by ID or name/update/delete).
+  - How to do it: Pydantic validation (dates must be YYYY-MM-DD, status must be
+    one allowed value), safe writes, corrupt-file recovery.
+  - Best expected outcome: test_storage.py passes, including tests for the empty
+    file, a corrupt file and duplicate names.
+
+  Step 3: LLM parser
+
+  - What it involves: llm.py connects to OpenRouter and returns a ParsedInput
+    for any sentence.
+  - How to do it: ChatOpenAI(base_url=openrouter, model=env) with
+    .with_structured_output(ParsedInput). The prompt includes today's date, so
+    "next Monday" can be turned into a real date.
+  - Best expected outcome: A small manual script turns 5 sample sentences into
+    the correct intent and fields.
+
+  Step 4: Graph (state, nodes, routing)
+
+  - What it involves: Everything in graph/, wired with a checkpointer.
+  - How to do it: Each node is a small function. Routing is plain if logic on
+    parsed.intent and awaiting.
+  - Best expected outcome: test_slot_filling.py and test_flows.py pass using
+    FakeParser, with no network.
+
+  Step 5: Console loop
+
+  - What it involves: cli.py and main.py.
+  - How to do it: A while True input loop that handles quit/exit, Ctrl+C/Ctrl+D
+    and empty lines, with try/except around each turn.
+  - Best expected outcome: A real session runs through the example dialogue
+    above and never shows a traceback.
+
+  Step 6: Hardening and README
+
+  - What it involves: Retry on LLM errors, nicer formatting, help text, README
+    with setup steps.
+  - How to do it: Manually test bad input: gibberish, an unknown project, two
+    projects with the same name, the network turned off.
+  - Best expected outcome: Every case gets a friendly reply, and the README is
+    enough for a fresh setup.
+
+  ---
+
+  Phase 3: Plain explanation
+
+  The app is a chat in the terminal. You type normal sentences like "add a
+  project for Acme". It works out what you want, asks for anything missing, and
+  stores projects in a file.
+
+  Three terms you'll see:
+  - LangGraph graph: a flowchart written in code. Each box (a node) does one
+    job, like "read the sentence" or "save the project". Arrows (edges) decide
+    which box runs next. Example: if the sentence was "list projects", the arrow
+    goes to the list_projects box.
+  - State: the notepad passed between boxes. Example: draft = {"project_name": 
+    "Office Fit-out"} sits on the notepad until the customer arrives.
+  - Checkpointer: saves the notepad after each of your messages, so the next
+    message picks up where you left off.
+
+  First we build the file storage and test it without any AI. Then we connect
+  the AI, but only to turn a sentence into a filled-in form. Then we build the
+  flowchart that acts on that form. The rules ("customer is required") live in
+  plain code, not in the AI. Finally we wrap it in the input loop and test it on
+  messy input. At the end you can run pytest (all green, works offline) and
+  python main.py for a real chat.
+
+  ---
+
+  Phase 4: Options
+
+  The main design choice is how the graph waits for the user's next answer.
+
+  Option: A. One graph run per message + checkpointer
+  What it means in practice: Each line you type runs the graph once. The draft
+    is remembered in saved state.
+  Pros: Every message is read fresh, which is exactly what 2b needs. Simple to
+    test turn by turn. Common LangGraph pattern.
+  Cons / tradeoffs: The parser needs the draft as context so it can read
+    "Acme" as an answer
+  Effort: M
+  Risk: Low
+  ────────────────────────────────────────
+  Option: B. Pause/resume with interrupt()
+  What it means in practice: The graph stops in the middle at "ask customer"
+    and continues when you answer.
+  Pros: Feels natural for strict question-and-answer
+  Cons / tradeoffs: Doesn't fit 2b: every reply needs routing anyway, so
+    pausing adds complexity. Harder to test.
+  Effort: M–L
+  Risk: Med
+  ────────────────────────────────────────
+  Option: C. Plain Python state machine, LLM for parsing only
+  What it means in practice: No LangGraph, just if statements
+  Pros: Least code
+  Cons / tradeoffs: Breaks your stated requirement to use LangGraph
+  Effort: S
+  Risk: Low (but off-spec)
+
+  Recommendation
+
+  Choose Option A. Your answer 2b means every reply can be either an answer or a
+  new command, so every reply has to be parsed and routed anyway. A does that
+  naturally. It also makes the offline tests from 3a simple: feed in a scripted
+  message, check the reply and the saved state. If you later decide you want
+  strict mode (2a), Option B becomes reasonable.
+
+  ---
+
+  Phase 5: Research gate
+
+  Ambiguity / risk: LangGraph and LangChain change their APIs often, for example
+  import paths and how the checkpointer is passed in. Also, OpenRouter's
+  support for structured output varies by model and by method (json_schema vs
+  function_calling). If I guess wrong on either, the build will hit import
+  errors or the parser will fail quietly.
+
+  Topics to research (read-only):
+  1. Current stable LangGraph API: StateGraph, MemorySaver/InMemorySaver import
+     path, how thread_id config is passed, conditional edges.
+  2. langchain-openai with OpenRouter: setting base_url and the API key, and
+     which with_structured_output method works reliably for openai/gpt-4o-mini
+     there.
+  3. Current stable versions of langgraph, langchain-core, langchain-openai and
+     pydantic, so requirements.txt can be pinned to versions that work together.
+
+  Recommendation
+
+  Research first. It takes a few minutes, and it prevents the most likely kind
+  of rework here: old API calls copied from memory.
+
+  Reply with one:
+  - research first: I'll look these up (read-only) and update the plan if
+    anything changes
+  - skip research: I'll go straight to the final plan and ask "Proceed?"
+  - research only: [topic numbers]
+
+✻ Baked for 1m 1s · done 3:23 PM
+
+❯ Let's go with Option A and research first before finalizing the plan.         
+  For step 6, please make sure the README.md explicitly covers:                 
+  - How to install dependencies                                                 
+  - How to configure OpenRouter in .env                                         
+  - The exact LLM provider and model used                                       
+  - How to run the app and offline tests                                        
+  - A brief explanation of the LangGraph workflow                               
+  - 2–3 example console sessions (including multi-turn creation, listing, and   
+  unclear input/exit)                                                           
+
+  Ran 1 shell command (ctrl+o to expand)
+
+⏺ Web Search("langgraph 1.0 release StateGraph InMemorySaver checkpointer
+            thread_id docs")
+  ⎿  Did 1 search in 5s
+
+⏺ Web Search("OpenRouter langchain ChatOpenAI base_url with_structured_output
+            json_schema function_calling")
+  ⎿  Did 1 search in 5s
+
+  Read 1 file, ran 3 shell commands (ctrl+o to expand)
+
+⏺ Guided Reasoning Progress:
+  - [x] Phase 1: Clarifying questions → 1c, 2b, 3a
+  - [x] Phase 2–4: Breakdown, explanation, Option A chosen
+  - [x] Phase 5: Research first → done (read-only)
+  - [x] Phase 6: Self-eval → best plan
+  - [ ] Execute (waiting on your Proceed?)
+
+  Research findings
+
+  1. Your Mac only has Python 3.9.6, which is too old. The project folder is
+  empty and there's no Python 3.10+ on this machine. LangGraph needs 3.10 or
+  newer, so you'll need to install a newer Python before Step 1.
+
+  2. The newest LangChain packages no longer support Python 3.10. I checked
+  PyPI:
+
+  ┌──────────────────┬────────┬──────────────┬──────────────────────────────┐
+  │     Package      │ Newest │   Python     │  Newest that still runs on   │
+  │                  │        │    needed    │             3.10             │
+  ├──────────────────┼────────┼──────────────┼──────────────────────────────┤
+  │ langgraph        │ 1.2.24 │ ≥3.10        │ 1.2.24                       │
+  ├──────────────────┼────────┼──────────────┼──────────────────────────────┤
+  │ langchain-core   │ 1.8.4  │ ≥3.11        │ 1.7.7                        │
+  ├──────────────────┼────────┼──────────────┼──────────────────────────────┤
+  │ langchain-openai │ 1.8.5  │ ≥3.11        │ 1.7.4                        │
+  └──────────────────┴────────┴──────────────┴──────────────────────────────┘
+
+  So requirements.txt will use ranges like langchain-openai>=1.7,<2. pip then
+  picks 1.7.x on Python 3.10 and 1.8.x on 3.11 or newer, and both satisfy your
+  3.10+ requirement.
+
+  3. The LangGraph memory API matches the plan. It's from 
+  langgraph.checkpoint.memory import InMemorySaver, then
+  builder.compile(checkpointer=...), then each call is invoked with
+  {"configurable": {"thread_id": "cli"}}. One catch: this memory lives in RAM. A
+  draft is lost if the app restarts, but saved projects are safe in
+  projects.json. (add-memory docs, persistence docs)
+
+  4. Connecting to OpenRouter. OpenRouter now has its own LangChain package,
+  langchain-openrouter, but it's still version 0.x. ChatOpenAI with
+  base_url="https://openrouter.ai/api/v1" is the well-tested route, so I'll keep
+  that. The default way of getting structured output has changed between
+  versions, so I'll set it explicitly: with_structured_output(ParsedInput, 
+  method="json_schema", strict=True, include_raw=True). The include_raw=True
+  part makes a bad reply come back as an error value instead of crashing, so it
+  can go to the unclear path. (LangChain OpenRouter docs, OpenRouter blog guide,
+  OpenRouter structured outputs, ChatOpenAI.with_structured_output reference)
+
+  5. The model is fine. OpenRouter's live model list shows openai/gpt-4o-mini
+  still available. It supports structured output and tool calling, and costs
+  about $0.15 per million input tokens and $0.60 per million output tokens.
+  anthropic/claude-haiku-5.5 is newer and a little cheaper, so you can switch
+  with one .env line. The README will say so.
+
+  What changes in the plan: a Python install step, version ranges in
+  requirements.txt, explicit structured-output settings, and every optional
+  field in ParsedInput written as str | None with no default value. The last one
+  is because strict mode rejects schemas with default values.
+
+  ---
+
+  Phase 6: Self-evaluation
+
+  Assumption audit
+
+  ┌──────────────────────────────────────────┬──────────────────────────────┐
+  │                Assumption                │            Status            │
+  ├──────────────────────────────────────────┼──────────────────────────────┤
+  │ Option A: one graph run per message,     │ Confirmed                    │
+  │ with InMemorySaver                       │                              │
+  ├──────────────────────────────────────────┼──────────────────────────────┤
+  │ A draft doesn't need to survive          │ Guess (fine for a console    │
+  │ restarting the app                       │ app; easy to add later)      │
+  ├──────────────────────────────────────────┼──────────────────────────────┤
+  │ Status values are planned / active /     │ Guess. Change it if you have │
+  │ on_hold / completed / cancelled          │  a different list.           │
+  ├──────────────────────────────────────────┼──────────────────────────────┤
+  │ Delete happens straight away, with no    │ Risky. Fixed below.          │
+  │ "are you sure?" step                     │                              │
+  ├──────────────────────────────────────────┼──────────────────────────────┤
+  │ You'll install Python 3.10+ yourself     │ Risky. Fixed below.          │
+  └──────────────────────────────────────────┴──────────────────────────────┘
+
+  Error check
+
+  - Hidden constraint: Python 3.9 would have broken the very first install. →
+    Added Step 0.
+  - Missing edge case: an accidental "delete Acme" with no way back. → Delete
+    now asks "Delete P-002 'Website Redesign'? (yes/no)". This adds one more
+    awaiting value, confirm_delete.
+  - Missing edge case: an update that matches more than one project. → Already
+    handled by ask_which, and covered by a test.
+  - Overbuilt? No. Every module maps to one of your requirements, and there's no
+    database or web layer.
+  - No cheap first test: → Step 3 now starts with a one-off check against
+    OpenRouter before the graph gets built.
+  - Same-turn execution: none. Nothing has been written yet.
+
+  Best plan (ready to execute)
+
+  0. You install Python 3.10+ (e.g. brew install python@3.12, or from
+     python.org) → done when python3.12 --version works. I won't install system
+     software.
+  1. Skeleton and config: create the folders, requirements.txt (langgraph
+     >=1.2,<2, langchain-core >=1.7,<2, langchain-openai >=1.7,<2, pydantic
+     >=2.7,<3, python-dotenv, pytest), .env.example, config.py, and a .venv →
+     done when python main.py prints a welcome line or a clear "missing
+     OPENROUTER_API_KEY" message.
+  2. Models and storage: Project with P-001 IDs, date and status validation,
+     safe writes, corrupt file renamed to .bak → done when pytest 
+     tests/test_storage.py passes (empty file, corrupt file, duplicate names,
+     lookup by ID or name).
+  3. LLM parser: ChatOpenAI pointed at OpenRouter, with json_schema + strict +
+     include_raw, one retry, and today's date in the prompt → done when a quick
+     check script parses 5 sample sentences correctly with your real key.
+  4. Graph: state, nodes, routing, InMemorySaver, delete confirmation, and the
+     draft reminder from 2b → done when pytest passes offline using FakeParser.
+     That covers multi-turn creation, switching commands mid-draft, cancel,
+     "which one?" for duplicate names, not-found, and LLM failure.
+  5. Console loop: quit/exit, Ctrl+C/Ctrl+D, empty input, catch-all errors →
+     done when a real session never shows a traceback.
+  6. Hardening and README. README.md covers:
+     - installing dependencies (Python 3.10+, venv, pip install -r 
+       requirements.txt)
+     - setting up OpenRouter in .env (getting a key, OPENROUTER_API_KEY,
+       OPENROUTER_MODEL, PROJECTS_FILE)
+     - the exact provider and model (OpenRouter → openai/gpt-4o-mini, and how to
+       swap it)
+     - how to run the app and the offline tests (python main.py, pytest)
+     - a short explanation of the LangGraph flow, with the node diagram and how
+       slot filling works
+     - 3 example sessions: (a) creating a project over several turns, with a
+       command in the middle; (b) listing when empty and when full, then
+       get/update/delete; (c) unclear input followed by exit
+
+     Done when someone with only the README can set up and run the app.
+
+  Out of scope for now: keeping drafts across restarts, any database other than
+  JSON, multiple users, streaming replies, search or filtering beyond
+  get-by-name/ID.
+  Research status: Done. It found the Python 3.9 problem, the version cap on
+  Python 3.10, the explicit structured-output settings, and confirmed the
+  InMemorySaver API and gpt-4o-mini availability.
+
+  Proceed with this plan? (yes / change X / stop)
+
+✻ Brewed for 1m 24s · done 3:30 PM
+
+※ recap: We're planning your LangGraph console app for managing projects, and the plan is ready for your review. Next, install Python 3.10 or newer (this Mac only has 3.9.6), then reply yes to start building. (turn off recaps in /config)
+
+❯ All of these assumptions look good except deletion: Please always require     
+  confirmation.                                                                 
+  I installed python@3.12 already, with that, let's process with the plan.      
+
+⏺ I'll start building. Delete confirmation is already in the plan, and I'll make
+  it a hard rule: a project is only deleted after an explicit yes. First I'll
+  check the new Python and set up the environment.
+
+  Ran 2 shell commands (ctrl+o to expand)
+
+⏺ Dependencies are installed. Next come the config, models and storage, which
+  don't use the LLM.
+
+⏺ Write(project_agent/__init__.py)
+  ⎿  Wrote 1 line to project_agent/__init__.py
+      1 """Console project assistant built with LangChain + LangGraph."""
+
+⏺ Write(project_agent/config.py)
+  ⎿  Wrote 58 lines to project_agent/config.py
+      1 """Load settings from the environment / .env file."""
+      2 
+      3 from __future__ import annotations
+      4 
+      5 import os
+      6 from dataclasses import dataclass
+      7 from pathlib import Path
+      8 
+      9 from dotenv import load_dotenv
+     … +49 lines (ctrl+o to expand)
+
+⏺ Write(project_agent/models.py)
+  ⎿  Wrote 190 lines to project_agent/models.py
+      1 """Data models: stored projects and the LLM's structured reading 
+        of user input."""
+      2 
+      3 from __future__ import annotations
+      4 
+      5 import re
+      6 from datetime import date
+      7 from typing import Literal, Optional
+      8 
+      9 from pydantic import BaseModel, Field, field_validator
+     … +181 lines (ctrl+o to expand)
+
+⏺ Write(project_agent/storage.py)
+  ⎿  Wrote 138 lines to project_agent/storage.py
+      1 """JSON-file storage for projects."""
+      2 
+      3 from __future__ import annotations
+      4 
+      5 import json
+      6 import os
+      7 from datetime import datetime, timezone
+      8 from pathlib import Path
+      9 from typing import Optional
+     … +129 lines (ctrl+o to expand)
+
+⏺ Write(project_agent/formatting.py)
+  ⎿  Wrote 36 lines to project_agent/formatting.py
+       1 """Turn projects into readable console text."""
+       2 
+       3 from __future__ import annotations
+       4 
+       5 from .models import FIELD_LABELS, Project
+       6 
+       7 
+       8 def project_line(p: Project) -> str:
+       9     extras = [x for x in (p.status, p.start_date and f"starts {p
+         .start_date}", p.location) if x]
+     … +27 lines (ctrl+o to expand)
+
+⏺ Next is the LLM layer: the prompt and the OpenRouter parser.
+
+⏺ Write(project_agent/graph/prompts.py)
+  ⎿  Wrote 44 lines to project_agent/graph/prompts.py
+       1 """Prompt used to turn a user message into ParsedInput."""
+       2 
+       3 from datetime import date
+       4 
+       5 SYSTEM_PROMPT = """\
+       6 You read ONE message from a user of a console project-tracking a
+         pp and return structured data.
+       7 Today is {today} ({weekday}).
+       8 
+       9 Intents:
+     … +35 lines (ctrl+o to expand)
+
+⏺ Write(project_agent/llm.py)
+  ⎿  Wrote 85 lines to project_agent/llm.py
+       1 """OpenRouter chat model + the parser that turns text into Parse
+         dInput."""
+       2 
+       3 from __future__ import annotations
+       4 
+       5 import logging
+       6 from datetime import date
+       7 from typing import Callable, Protocol
+       8 
+       9 import openai
+     … +76 lines (ctrl+o to expand)
+  Ran 3 shell commands · 1 failed (ctrl+o to expand)
+
+⏺ The schema is strict-mode compatible: every field is listed as required and
+  can be null. Now the graph itself.
+
+⏺ Write(project_agent/graph/state.py)
+  ⎿  Wrote 35 lines to project_agent/graph/state.py
+       1 """The state ("notepad") passed between graph nodes."""
+       2 
+       3 from __future__ import annotations
+       4 
+       5 from typing import Literal, Optional, TypedDict
+       6 
+       7 Awaiting = Literal["fields", "which_project", "confirm_delete"]
+       8 
+       9 
+      10 class AgentState(TypedDict, total=False):
+     … +25 lines (ctrl+o to expand)
+
+⏺ Write(project_agent/graph/nodes.py)
+  ⎿  Wrote 341 lines to project_agent/graph/nodes.py
+       1 """Graph nodes. Each node reads the state and returns the keys i
+         t changes."""
+       2 
+       3 from __future__ import annotations
+       4 
+       5 import json
+       6 from typing import Optional
+       7 
+       8 from ..formatting import describe_fields, project_detail, projec
+         t_line, project_list
+     … +333 lines (ctrl+o to expand)
+
+⏺ Write(project_agent/graph/routing.py)
+  ⎿  Wrote 39 lines to project_agent/graph/routing.py
+       1 """Functions that pick the next node (used on conditional edges)
+         ."""
+       2 
+       3 from __future__ import annotations
+       4 
+       5 from ..models import missing_required
+       6 from .state import AgentState
+       7 
+       8 # parse_input's decision -> next node
+       9 PARSE_ROUTES = {
+     … +30 lines (ctrl+o to expand)
+
+⏺ Write(project_agent/graph/builder.py)
+  ⎿  Wrote 70 lines to project_agent/graph/builder.py
+       1 """Wire the nodes and edges into a LangGraph StateGraph."""
+       2 
+       3 from __future__ import annotations
+       4 
+       5 from langgraph.checkpoint.base import BaseCheckpointSaver
+       6 from langgraph.checkpoint.memory import InMemorySaver
+       7 from langgraph.graph import END, START, StateGraph
+       8 
+       9 from ..llm import InputParser
+      10 from ..storage import ProjectRepository
+     … +60 lines (ctrl+o to expand)
+
+⏺ Write(project_agent/agent.py)
+  ⎿  Wrote 24 lines to project_agent/agent.py
+      1 """One object the console loop talks to: text in, reply out."""
+      2 
+      3 from __future__ import annotations
+      4 
+      5 from .graph.builder import build_graph
+      6 from .graph.state import TURN_RESET
+      7 from .llm import InputParser
+      8 from .storage import ProjectRepository
+      9 
+     … +15 lines (ctrl+o to expand)
+
+⏺ Write(project_agent/cli.py)
+  ⎿  Wrote 53 lines to project_agent/cli.py
+      1 """The stdin/stdout loop."""
+      2 
+      3 from __future__ import annotations
+      4 
+      5 import logging
+      6 import os
+      7 from typing import Callable, Protocol
+      8 
+      9 log = logging.getLogger(__name__)
+     … +44 lines (ctrl+o to expand)
+
+⏺ Write(main.py)
+  ⎿  Wrote 37 lines to main.py
+       1 """Entry point: python main.py"""
+       2 
+       3 from __future__ import annotations
+       4 
+       5 import logging
+       6 import os
+       7 import sys
+       8 
+       9 from project_agent.agent import ProjectAssistant
+      10 from project_agent.cli import run
+     … +27 lines (ctrl+o to expand)
+
+⏺ Now the offline tests with a fake parser:
+
+⏺ Write(tests/fakes.py)
+  ⎿  Wrote 23 lines to tests/fakes.py
+      1 """A stand-in for the LLM so tests run offline and deterministica
+        lly."""
+      2 
+      3 from __future__ import annotations
+      4 
+      5 from project_agent.llm import LLMUnavailableError
+      6 from project_agent.models import ParsedInput
+      7 
+      8 P = ParsedInput.make  # shorthand: P("create", project_name="X", 
+        customer="Y")
+     … +15 lines (ctrl+o to expand)
+
+⏺ Write(tests/conftest.py)
+  ⎿  Wrote 27 lines to tests/conftest.py
+      1 import sys
+      2 from pathlib import Path
+      3 
+      4 import pytest
+      5 
+      6 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+      7 sys.path.insert(0, str(Path(__file__).resolve().parent))
+      8 
+      9 from fakes import FakeParser  # noqa: E402
+     … +18 lines (ctrl+o to expand)
+
+⏺ Write(tests/test_storage.py)
+  ⎿  Wrote 98 lines to tests/test_storage.py
+       1 import json
+       2 
+       3 import pytest
+       4 
+       5 from project_agent.models import clean_fields, normalize_id
+       6 from project_agent.storage import ProjectRepository, StorageErro
+         r
+       7 
+       8 
+       9 def test_missing_file_starts_empty(repo):
+     … +89 lines (ctrl+o to expand)
+
+⏺ Write(tests/test_slot_filling.py)
+  ⎿  Wrote 114 lines to tests/test_slot_filling.py
+       1 from fakes import P
+       2 
+       3 
+       4 def test_create_asks_for_both_then_each_missing_field(bot, parse
+         r, repo):
+       5     parser.script.update(
+       6         {
+       7             "new project in Bangkok starting Dec 1": P(
+       8                 "create", location="Bangkok", start_date="2026-1
+         2-01"
+     … +106 lines (ctrl+o to expand)
+
+⏺ Write(tests/test_flows.py)
+  ⎿  Wrote 172 lines to tests/test_flows.py
+       1 import pytest
+       2 from fakes import P
+       3 
+       4 from project_agent.cli import run
+       5 
+       6 
+       7 @pytest.fixture
+       8 def seeded(repo):
+       9     repo.add({"project_name": "Website Redesign", "customer": "A
+         cme"})
+     … +163 lines (ctrl+o to expand)
+
+  Ran 1 shell command (ctrl+o to expand)
+
+⏺ All 39 tests pass on the first run. One test has a sloppy or True assertion
+  that can never fail, so I'll remove it, and add a live check script for when
+  your key is in .env.
+
+⏺ Update(tests/test_slot_filling.py)
+  ⎿  Added 2 lines, removed 2 lines
+      19      reply = bot.handle("it's called Office Fit-out")
+      20      assert "Who is the customer?" in reply
+      21      assert repo.list_all() == []
+      22 -    # The LLM is told what we are waiting for, so a bare reply 
+         -can be understood.                                             
+      23 -    assert "just asked the user for: customer" in parser.calls[
+         --1][1] or True                                                 
+      22 
+      23      reply = bot.handle("Siam Corp")
+      24 +    # The LLM was told what we were waiting for, so the bare re
+         +ply could be understood.                                       
+      25 +    assert "just asked the user for: customer" in parser.calls[
+         +-1][1]                                                         
+      26      assert reply.startswith("Saved P-001")
+      27      [project] = repo.list_all()
+      28      assert (project.project_name, project.customer, project.loc
+          ation, project.start_date) == (
+
+⏺ Write(scripts/check_llm.py)
+  ⎿  Wrote 48 lines to scripts/check_llm.py
+      1 """Live check: send a few sample sentences to OpenRouter and prin
+        t how they are parsed.
+      2 
+      3 Usage:  python scripts/check_llm.py      (needs OPENROUTER_API_KE
+        Y in .env; costs a fraction of a cent)
+      4 """
+      5 
+      6 from __future__ import annotations
+      7 
+      8 import sys
+     … +40 lines (ctrl+o to expand)
+
+  Ran 1 shell command (ctrl+o to expand)
+
+⏺ The error handling now works against the real OpenRouter API, with a bad key
+  giving a friendly message while the loop keeps going. I'm generating the
+  README's example sessions from the real app code next. · summary
+
+  Ran 1 shell command (ctrl+o to expand)
+
+⏺ Those tracebacks come from my throwaway demo script running out of scripted
+  lines, not from the app. Now the README:
+
+⏺ Write(README.md)
+  ⎿  Wrote 256 lines to README.md
+       1 # Console Project Assistant
+       2 
+       3 A terminal app for managing projects in plain English. Type sent
+         ences like *"new project
+       4 Website Redesign for Acme Corp starting Dec 1"*. The app works o
+         ut what you mean, asks
+       5 follow-up questions for anything required that's missing, and sa
+         ves projects to a local
+       6 `projects.json` file.
+       7 
+     … +249 lines (ctrl+o to expand)
+
+  Ran 1 shell command (ctrl+o to expand)
+⏺ The app is built and all 39 offline tests pass. The one thing not yet tested
+  is a run against a real model, because there's no API key on this machine yet.
+
+  Your next steps:
+  cd ~/Documents/console-project-agent
+  cp .env.example .env              # then paste your OpenRouter key into .env
+  source .venv/bin/activate
+  python scripts/check_llm.py       # sends 5 sample sentences to the model and 
+  prints how each is understood
+  python main.py                    # start the app
+  If check_llm.py misreads a sample, the fix is almost always a wording change
+  in project_agent/graph/prompts.py.
+
+  What's been checked
+  - Offline tests: they use a fake model with scripted answers instead of
+    OpenRouter. They cover storage, creating a project over several turns,
+    switching commands mid-draft, cancel, choosing between same-named projects,
+    delete confirmation, the model being unreachable, and the input loop.
+  - Starting without a key prints setup instructions and exits cleanly.
+  - A request to OpenRouter with a fake key comes back as "OpenRouter rejected
+    the API key…" and the loop keeps running. So the connection to OpenRouter
+    works, but the model's reading of real sentences is unproven until you run
+    check_llm.py.
+
+  How it matches what you asked for
+  - Delete always asks first. Only yes, y or confirm deletes. Any other reply
+    keeps the project. If that reply is a new command, it runs as usual, and a
+    later stray "yes" deletes nothing. Four tests cover this.
+  - The README has all six sections you listed. Its three example sessions were
+    produced by running the real app code with scripted model answers, so the
+    app's replies are exact. The model's reading of each sentence could differ
+    slightly from those scripts.
+
+  Changes from the plan
+  - I added scripts/check_llm.py (the live check above), a .gitignore that keeps
+    .env and projects.json out of git, and an agent.py file that connects the
+    input loop to the graph.
+  - The words cancel, help, list, yes/no, and picking a project by number or ID
+    are handled without calling the model. They still work when the API is down.
+  - The virtual environment uses your Python 3.12, so pip installed the newest
+    LangChain packages (1.8.x). On Python 3.10, pip would pick 1.7.x instead;
+    the README explains this.
+
+  Known limitations (also listed in the README): an unsaved draft is lost when
+  you quit, an update can't clear a field back to empty, and only one person can
+  use the app at a time.
+
+✻ Baked for 7m 17s · done 3:46 PM
+
+※ recap: We're building your LangGraph console project assistant, and it's finished with all 39 offline tests passing but not yet tried with a real model. Next, put your OpenRouter key in .env and run python scripts/check_llm.py. (turn off recaps in /config)
+
+❯ I tested the app and noticed two issues during project creation:              
+                                                                                
+  1. When a name is ambiguous (unclear whether it's the project name or the     
+  customer), the app guesses instead of asking for clarification.               
+  2. Even when I explicitly corrected it—saying "Dresswell is not the project   
+  name, it's the customer"—the app still saved "Dresswell" as both the project  
+  name and the customer because it never cleared the wrong field from the       
+  draft.                                                                        
+                                                                                
+  Can we fix this so the agent asks for clarification when a name is ambiguous, 
+  and properly clears/removes a draft field when the user corrects it?          
+
+  Searched for 1 pattern, read 1 file (ctrl+o to expand)
+
+⏺ Exception E5 (re-entry): the approved plan changed, so I'm re-planning only
+  this part, starting at Phase 4. Phase 5 is cut to one line because the problem
+  is in our own code, with no outside docs to check.
+
+  Why it happens
+
+  1. The model has no way to say "I'm not sure." ParsedInput
+     (project_agent/models.py:96) forces every value into a field. When you
+     reply Dresswell while both the project name and customer are missing, the
+     model has to pick one. The prompt even nudges it to guess
+     (project_agent/graph/prompts.py:36).
+  2. The model has no way to say "remove this." In the form it fills in, null
+     means "not mentioned", not "delete". And merge_draft only adds values
+     (project_agent/graph/nodes.py:167, draft.update(clean)). So for your
+     correction, the model correctly set customer="Dresswell", but the old
+     project_name="Dresswell" stayed in the draft. With both required fields
+     filled, the app saved it.
+
+  Phase 4: Options
+
+  Option: A. Prompt only
+  What it means in practice: Have the model return the whole corrected draft
+    every turn
+  Pros: Small change
+  Cons / tradeoffs: Relies entirely on the model, which can quietly drop
+    fields. Doesn't fix the guessing.
+  Effort: S
+  Risk: Med
+  ────────────────────────────────────────
+  Option: B. New form fields + code safety checks
+  What it means in practice: Add clear_fields ("remove these") and
+    ambiguous_value ("not sure which field this is") to the form. The code
+    then removes fields and asks a follow-up question. Plus checks in plain
+    code that don't depend on the model.
+  Pros: Fixes both bugs. Still works if the model slips up. Easy to test
+    offline.
+  Cons / tradeoffs: A few more lines in parse, merge and routing
+  Effort: M
+  Risk: Low
+  ────────────────────────────────────────
+  Option: C. Confirm before every save
+  What it means in practice: Always ask "Save Dresswell for Dresswell? yes/no"
+  Pros: Very safe
+  Cons / tradeoffs: Adds an extra turn to every create, and still can't remove
+    a single field
+  Effort: S
+  Risk: Low
+
+  Recommendation
+
+  Choose Option B. It fixes the cause of both problems instead of hiding it. The
+  plain-code check would have caught your exact case even if the model had
+  ignored the correction.
+
+  How it would work:
+  - New form fields:
+    - clear_fields: a list of fields to remove, like ["project_name"].
+    - ambiguous_value: a value like "Dresswell" that the model can't place.
+  - Prompt examples:
+    - "Dresswell is not the project name, it's the customer" →
+      clear_fields=["project_name"], customer="Dresswell"
+    - A bare Dresswell while both fields are missing →
+      ambiguous_value="Dresswell", no guess
+    - "remove the location" → clear_fields=["location"]
+  - merge_draft removes the cleared fields first, then adds the new values, and
+    adds a short note like "Removed project name 'Dresswell'."
+  - Safety check in plain code: if the project name and customer end up
+    identical, the app doesn't save. That covers the case where the model
+    forgets clear_fields. It takes the value out of both fields and asks: "Is 
+    'Dresswell' the project name, the customer, or both?"
+  - New awaiting="clarify_field" state:
+    - Replies like customer, project name or both are matched without calling
+      the model.
+    - both is accepted, so a project really can share its customer's name.
+    - Anything else goes to the model with the question as context.
+  - Graph: the check_required edge gets a third branch, ask_clarify, next to
+    ask_missing and save_project.
+
+  Phase 5 (research): Skip. This is a fix inside our own code. The new form
+  fields follow the same strict-schema pattern as the existing ones: required in
+  the schema, but allowed to be empty.
+
+  Phase 6: Self-evaluation
+
+  ┌───────────────────────────────────────────┬─────────────────────────────┐
+  │                Assumption                 │           Status            │
+  ├───────────────────────────────────────────┼─────────────────────────────┤
+  │ "Ambiguous" mainly means project name vs  │ Guess                       │
+  │ customer (the two required fields)        │                             │
+  ├───────────────────────────────────────────┼─────────────────────────────┤
+  │ A bare value when only one field is       │ Guess (keeps the common     │
+  │ missing is not ambiguous; it fills that   │ case to one turn)           │
+  │ field                                     │                             │
+  ├───────────────────────────────────────────┼─────────────────────────────┤
+  │ If you ignore the "which field?" question │ Risky. Simpler than         │
+  │  and type another command, that value is  │ juggling two pending        │
+  │ dropped with a note, and the rest of the  │ questions. Tell me if you'd │
+  │ draft is kept                             │  rather keep it.            │
+  ├───────────────────────────────────────────┼─────────────────────────────┤
+  │ A project whose name really equals its    │ Confirmed by design         │
+  │ customer stays possible via both          │                             │
+  └───────────────────────────────────────────┴─────────────────────────────┘
+
+  Error check
+  - Could this over-trigger? The plain-code check only fires on identical
+    values, so normal input isn't affected.
+  - Edge case: removing every field leaves an empty draft. That just goes back
+    to "What's the project name, and who is the customer?"
+  - Scope: removing fields from existing projects through update (the README
+    limitation) is related, but it isn't what you asked for. I'm leaving it out
+    unless you want it.
+
+  Best plan (ready to execute)
+
+  1. Add clear_fields and ambiguous_value to ParsedInput, and examples to the
+     prompt → done when the strict schema still builds (I'll check this
+     offline).
+  2. merge_draft: remove cleared fields, then add new ones, then run the "same
+     value" check; set awaiting="clarify_field" when needed → done when the
+     Dresswell correction leaves {customer: "Dresswell"} and the app asks for
+     the project name.
+  3. Add the ask_clarify node and edge, handle replies to the clarify question
+     in parse_input (project name / customer / both without the model,
+     everything else with it), and add the drop note in finalize → done when a
+     bare Dresswell gets "project name, customer, or both?" and nothing is
+     saved.
+  4. Tests:
+     - your exact correction
+     - an ambiguous bare value, answered customer, both, or in free text through
+       the model
+     - the same-value check when the model forgets clear_fields
+     - remove the location
+     - typing another command while the clarify question is waiting
+
+     Done when pytest passes.
+  5. Update the README (a correction example in the sessions, and the
+     slot-filling explanation) → done when the README describes the new
+     behaviour.
+
+  Out of scope for now: removing fields from existing projects through update.
+  Research status: Skipped. Local fix, same schema pattern as the current
+  fields.
+
+  Proceed with this plan? (yes / change X / stop)
+
+✻ Worked for 1m 15s · done 4:08 PM
+
+※ recap: We're fixing the project assistant so it asks which field an unclear name like "Dresswell" belongs to, and properly removes a field when you correct it. I need your yes to start the changes. (turn off recaps in /config)
+
+❯ yes                                                                           
+
+⏺ Starting with the schema and the prompt.
+
+⏺ Update(project_agent/models.py)
+  ⎿  Added 13 lines
+      107      choice: Optional[str] = Field(
+      108          description="For choose: the project ID or list number
+            picked. Otherwise null"
+      109      )
+      110 +    clear_fields: list[FieldName] = Field(                    
+      111 +        description="Draft fields the user says are wrong or s
+          +hould be removed "                                            
+      112 +        "(e.g. 'X is not the project name'). Empty list if non
+          +e"                                                            
+      113 +    )                                                         
+      114 +    ambiguous_value: Optional[str] = Field(                   
+      115 +        description="A value the user gave when it is unclear 
+          +which field it belongs to "                                   
+      116 +        "(e.g. a bare name that could be the project name or t
+          +he customer). "                                               
+      117 +        "Do not also put it in fields. Otherwise null"        
+      118 +    )                                                         
+      119 
+      120      @classmethod
+      121      def make(
+     ...
+      123          intent: str,
+      124          project_ref: Optional[str] = None,
+      125          choice: Optional[str] = None,
+      126 +        clear_fields: Optional[list[str]] = None,             
+      127 +        ambiguous_value: Optional[str] = None,                
+      128          **fields: Optional[str],
+      129      ) -> "ParsedInput":
+      130          """Convenience constructor (used by tests and fast pat
+           hs)."""
+     ...
+      134              fields=ProjectFields(**full),
+      135              project_ref=project_ref,
+      136              choice=choice,
+      137 +            clear_fields=list(clear_fields or []),  # type: ig
+          +nore[arg-type]                                                
+      138 +            ambiguous_value=ambiguous_value,                  
+      139          )
+      140 
+      141 
+
+⏺ Update(project_agent/models.py)
+  ⎿  Added 2 lines
+      39      "notes": "notes",
+      40  }
+      41 
+      42 +FieldName = Literal["project_name", "customer", "start_date", "
+         +location", "status", "notes"]                                  
+      43 +                                                               
+      44  Intent = Literal[
+      45      "create",
+      46      "provide_info",
+
+⏺ Update(project_agent/graph/prompts.py)
+  ⎿  Added 17 lines, removed 2 lines
+      33  Example: "rename Website Redesign to Web 2.0" -> intent update,
+           project_ref "Website Redesign",
+      34  fields.project_name "Web 2.0".
+      35 
+      36 +clear_fields: draft fields the user says are WRONG or wants REM
+         +OVED. Corrections usually                                      
+      37 +both clear a field and set another. Examples:                  
+      38 +- "Dresswell is not the project name, it's the customer" -> int
+         +ent provide_info,                                              
+      39 +  clear_fields ["project_name"], fields.customer "Dresswell".  
+      40 +- "remove the location" / "there's no start date" -> clear_fiel
+         +ds ["location"] / ["start_date"].                              
+      41 +Otherwise use an empty list.                                   
+      42 +                                                               
+      43 +ambiguous_value: NEVER guess which field a value belongs to. If
+         + the user gives a name and it is                               
+      44 +genuinely unclear whether it is the project name or the custome
+         +r (e.g. a bare "Dresswell"                                     
+      45 +while the assistant is asking for BOTH), put it in ambiguous_va
+         +lue and leave those fields null.                               
+      46 +Clear cases are not ambiguous: "project Apollo" or "called Apol
+         +lo" -> project_name;                                           
+      47 +"for Acme" / "client Acme" -> customer; a bare value when the a
+         +ssistant asked for exactly ONE                                 
+      48 +field -> that field.                                           
+      49 +                                                               
+      50  Use the conversation context to interpret short replies. If the
+           assistant is waiting for
+      51  missing draft fields and the user replies with a bare value, th
+          at is provide_info for the
+      38 -field that was asked for. If the user clearly asks for somethin
+         -g else (e.g. "list projects"),                                 
+      39 -use that intent instead.                                       
+      52 +field that was asked for. If the assistant asked which field a 
+         +value belongs to, answer with                                  
+      53 +provide_info and put the value in the field(s) the user names. 
+         +If the user clearly asks for                                   
+      54 +something else (e.g. "list projects"), use that intent instead.
+      55  """
+      56 
+      57 
+
+  Ran 1 shell command (ctrl+o to expand)
+
+⏺ The schema builds and stays strict-compatible: both new fields are required
+  (can be null or an empty list), and extra properties are not allowed. Now the
+  state, nodes, routing and builder:
+
+⏺ Update(project_agent/graph/state.py)
+  ⎿  Added 1 line, removed 1 line
+       4 
+       5  from typing import Literal, Optional, TypedDict
+       6 
+       7 -Awaiting = Literal["fields", "which_project", "confirm_delete"]
+       7 +Awaiting = Literal["fields", "which_project", "confirm_delete",
+         + "clarify_field"]                                              
+       8 
+       9 
+      10  class AgentState(TypedDict, total=False):
+
+⏺ Update(project_agent/graph/state.py)
+  ⎿  Added 5 lines, removed 1 line
+      17      changes: Optional[dict]  # validated field changes for upda
+          te
+      18      notes: list[str]  # extra lines shown before the main reply
+      19      response: str  # final text shown to the user
+      20 +    allow_same: bool  # user confirmed project name and custome
+         +r really are the same                                          
+      21 
+      22      # ---- remembered across turns (saved by the checkpointer)
+      23      draft: Optional[dict]  # half-built project waiting for req
+          uired fields
+      24      awaiting: Optional[Awaiting]  # what question we are waitin
+          g on
+      24 -    pending_op: Optional[dict]  # e.g. {"op": "update", "change
+         -s": {...}, "candidates": [...]}                                
+      25 +    # e.g. {"op": "update", "changes": {...}, "candidates": [..
+         +.]}                                                            
+      26 +    #  or  {"op": "clarify_field", "value": "Dresswell", "field
+         +s": ["project_name", "customer"]}                              
+      27 +    pending_op: Optional[dict]                                 
+      28 
+      29 
+      30  TURN_RESET: AgentState = {
+     ...
+      35      "changes": None,
+      36      "notes": [],
+      37      "response": "",
+      38 +    "allow_same": False,                                       
+      39  }
+
+⏺ Update(project_agent/graph/nodes.py)
+  ⎿  Added 1 line
+       9  from ..llm import InputParser, LLMUnavailableError
+      10  from ..models import (
+      11      FIELD_LABELS,
+      12 +    REQUIRED_FIELDS,                                           
+      13      ParsedInput,
+      14      clean_fields,
+      15      missing_required,
+
+⏺ Update(project_agent/graph/nodes.py)
+  ⎿  Added 8 lines
+      24  HELP_WORDS = {"help", "?", "h", "commands"}
+      25  LIST_WORDS = {"list", "ls", "list projects", "show projects", "
+          show all projects"}
+      26 
+      27 +# Answers to "Is 'X' the project name or the customer?" that ne
+         +ed no LLM.                                                     
+      28 +FIELD_ANSWERS = {                                              
+      29 +    "project_name": {"project name", "project", "name", "projec
+         +t title", "title", "project_name"},                            
+      30 +    "customer": {"customer", "client", "customer name", "client
+         + name"},                                                       
+      31 +}                                                              
+      32 +BOTH_WORDS = {"both", "both of them", "both fields", "it's both
+         +", "its both"}                                                 
+      33 +_ANSWER_PREFIXES = ("it's the ", "its the ", "it is the ", "the
+         + ", "it's ", "its ", "it is ")                                 
+      34 +                                                               
+      35  HELP_TEXT = """\
+      36  Here's what I can do (just type normally):
+      37    • Create:  "New project Website Redesign for Acme Corp, start
+          ing 2026-12-01 in Bangkok"
+
+⏺ Update(project_agent/graph/nodes.py)
+  ⎿  Added 15 lines
+      75              out.update(awaiting=None, pending_op=None)
+      76              awaiting, pending = None, {}
+      77 
+      78 +        # --- "Is 'X' the project name or the customer?" answer
+         +ed plainly: no LLM needed.                                     
+      79 +        if awaiting == "clarify_field":                        
+      80 +            picked = self._match_field_answer(low, pending.get(
+         +"fields", []))                                                 
+      81 +            if picked:                                         
+      82 +                value = pending["value"]                       
+      83 +                return {                                       
+      84 +                    "route": "clarified",                      
+      85 +                    "awaiting": None,                          
+      86 +                    "pending_op": None,                        
+      87 +                    "allow_same": len(picked) > 1,             
+      88 +                    "parsed": ParsedInput.make(                
+      89 +                        "provide_info", **{f: value for f in pi
+         +cked}                                                          
+      90 +                    ).model_dump(),                            
+      91 +                }                                              
+      92 +                                                               
+      93          # --- "Which project?" answered with a number or ID: no
+           LLM needed.
+      94          if awaiting == "which_project":
+      95              pick = self._match_choice(low, pending.get("candida
+          tes", []))
+
+⏺ Update(project_agent/graph/nodes.py)
+  ⎿  Added 2 lines, removed 2 lines
+      100          if low in CANCEL_WORDS:
+      101              return {**out, "notes": notes, "route": "cancel"}
+      102          if low in HELP_WORDS:
+      103 -            return {**out, "notes": notes, "route": "help"}   
+      103 +            return self._leave_pending(awaiting, pending, {**o
+          +ut, "notes": notes, "route": "help"})                         
+      104          if low in LIST_WORDS:
+      105 -            return self._leave_which(awaiting, {**out, "notes"
+          -: notes, "route": "list"})                                    
+      105 +            return self._leave_pending(awaiting, pending, {**o
+          +ut, "notes": notes, "route": "list"})                         
+      106 
+      107          # --- Everything else goes to the LLM.
+      108          context_state = {**state, **out}
+
+⏺ Update(project_agent/graph/nodes.py)
+  ⎿  Added 32 lines, removed 6 lines
+      121                  result["target_id"] = self._match_choice(
+      122                      (parsed.choice or "").casefold(), pending.
+           get("candidates", [])
+      123                  )
+      124 -        elif route == "provide_info" and not state.get("draft"
+          -):                                                            
+      124 +        elif route == "provide_info" and state.get("draft") is
+          + None:                                                        
+      125              # Details with no draft in progress: treat as star
+           ting a new project.
+      126              has_details = any(v for v in parsed.fields.model_d
+           ump().values())
+      127 -            route = "create" if has_details else "unclear"    
+      127 +            route = "create" if has_details or parsed.ambiguou
+          +s_value else "unclear"                                        
+      128 
+      129 +        if awaiting == "clarify_field" and route == "provide_i
+          +nfo":                                                         
+      130 +            # A free-text answer to "project name or customer?
+          +"; if the user put the                                        
+      131 +            # value in both fields, that was their explicit ch
+          +oice.                                                         
+      132 +            result["allow_same"] = True                       
+      133 +                                                              
+      134          result["route"] = route
+      130 -        return self._leave_which(awaiting, result)            
+      135 +        return self._leave_pending(awaiting, pending, result) 
+      136 
+      137      @staticmethod
+      133 -    def _leave_which(awaiting: Optional[str], result: AgentSta
+          -te) -> AgentState:                                            
+      134 -        """If the user moved on from a 'which project?' questi
+          -on, drop it."""                                               
+      135 -        if awaiting == "which_project" and result.get("route")
+          - != "choose":                                                 
+      138 +    def _leave_pending(awaiting: Optional[str], pending: dict,
+          + result: AgentState) -> AgentState:                           
+      139 +        """Drop a pending question the user has moved on from.
+          +"""                                                           
+      140 +        route = result.get("route")                           
+      141 +        if awaiting == "which_project" and route != "choose": 
+      142              result.update(awaiting=None, pending_op=None)
+      143 +        elif awaiting == "clarify_field":                     
+      144 +            result.update(awaiting=None, pending_op=None)     
+      145 +            if route not in ("provide_info", "create", "cancel
+          +"):                                                           
+      146 +                result["notes"] = list(result.get("notes") or 
+          +[]) + [                                                       
+      147 +                    f"(I set '{pending.get('value')}' aside. T
+          +ell me later whether it's "                                   
+      148 +                    "the project name or the customer.)"      
+      149 +                ]                                             
+      150          return result
+      151 
+      152 +    @staticmethod                                             
+      153 +    def _match_field_answer(answer: str, fields: list[str]) ->
+          + list[str]:                                                   
+      154 +        answer = answer.strip().strip(".!")                   
+      155 +        if answer in BOTH_WORDS:                              
+      156 +            return list(fields)                               
+      157 +        for prefix in _ANSWER_PREFIXES:                       
+      158 +            if answer.startswith(prefix):                     
+      159 +                answer = answer[len(prefix):]                 
+      160 +                break                                         
+      161 +        if answer in BOTH_WORDS:                              
+      162 +            return list(fields)                               
+      163 +        return [f for f in fields if answer in FIELD_ANSWERS.g
+          +et(f, ())][:1]                                                
+      164 +                                                              
+      165      def _match_choice(self, answer: str, candidates: list[str]
+           ) -> Optional[str]:
+      166          answer = answer.strip().strip(".").removeprefix("#").s
+           trip()
+      167          if not answer:
+
+⏺ Update(project_agent/graph/nodes.py)
+  ⎿  Added 6 lines
+      180              if missing and state.get("awaiting") == "fields":
+      181                  asked = " and ".join(FIELD_LABELS[m] for m in
+           missing)
+      182                  lines.append(f"- The assistant just asked the 
+           user for: {asked}")
+      183 +        if state.get("awaiting") == "clarify_field":          
+      184 +            pending = state.get("pending_op") or {}           
+      185 +            lines.append(                                     
+      186 +                f"- The assistant asked whether '{pending.get(
+          +'value')}' is the project name, "                             
+      187 +                "the customer, or both."                      
+      188 +            )                                                 
+      189          if state.get("awaiting") == "which_project":
+      190              pending = state.get("pending_op") or {}
+      191              options = []
+
+⏺ Update(project_agent/graph/nodes.py)
+  ⎿  Added 45 lines, removed 1 line
+      220              )
+      221              draft = {}
+      222 
+      223 +        # 1. Corrections: remove fields the user said are wron
+          +g, then add new values.                                       
+      224 +        for name in parsed.clear_fields:                      
+      225 +            old = draft.pop(name, None)                       
+      226 +            if old is not None and name not in clean:         
+      227 +                notes.append(f"Removed {FIELD_LABELS[name]} '{
+          +old}'.")                                                      
+      228          draft.update(clean)
+      229          notes.extend(problems)
+      225 -        if not clean and state["route"] == "provide_info":    
+      230 +                                                              
+      231 +        # 2. Never guess: a value the LLM couldn't place goes 
+          +back to the user.                                             
+      232 +        ambiguous = (parsed.ambiguous_value or "").strip()    
+      233 +                                                              
+      234 +        # 3. Safety net (works even if the LLM missed a correc
+          +tion): the same value as                                      
+      235 +        #    both project name and customer is almost always a
+          + mix-up, so ask.                                              
+      236 +        name, customer = draft.get("project_name"), draft.get(
+          +"customer")                                                   
+      237 +        if (                                                  
+      238 +            not ambiguous                                     
+      239 +            and not state.get("allow_same")                   
+      240 +            and name                                          
+      241 +            and customer                                      
+      242 +            and name.casefold() == customer.casefold()        
+      243 +        ):                                                    
+      244 +            ambiguous = name                                  
+      245 +            draft.pop("project_name")                         
+      246 +            draft.pop("customer")                             
+      247 +                                                              
+      248 +        if ambiguous:                                         
+      249 +            return {                                          
+      250 +                "draft": draft,                               
+      251 +                "notes": notes,                               
+      252 +                "awaiting": "clarify_field",                  
+      253 +                "pending_op": {                               
+      254 +                    "op": "clarify_field",                    
+      255 +                    "value": ambiguous,                       
+      256 +                    "fields": list(REQUIRED_FIELDS),          
+      257 +                },                                            
+      258 +            }                                                 
+      259 +                                                              
+      260 +        if not clean and not parsed.clear_fields and state["ro
+          +ute"] == "provide_info":                                      
+      261              notes.append("I didn't catch any project details i
+           n that.")
+      262          return {"draft": draft, "notes": notes}
+      263 
+      264 +    def ask_clarify(self, state: AgentState) -> AgentState:   
+      265 +        value = (state.get("pending_op") or {}).get("value")  
+      266 +        known = describe_fields(state.get("draft") or {})     
+      267 +        prefix = f"Got it ({known}). " if known else ""       
+      268 +        return {                                              
+      269 +            "response": f"{prefix}Is '{value}' the project nam
+          +e or the customer? "                                          
+      270 +            "(Reply \"project name\", \"customer\", or \"both\
+          +".)"                                                          
+      271 +        }                                                     
+      272 +                                                              
+      273      def ask_missing(self, state: AgentState) -> AgentState:
+      274          draft = state.get("draft") or {}
+      275          missing = missing_required(draft)
+
+⏺ Update(project_agent/graph/nodes.py)
+  ⎿  Added 5 lines, removed 1 line
+      431          awaiting = state.get("awaiting")
+      432          if draft and awaiting is None:
+      433              awaiting = "fields"  # go back to collecting the d
+           raft's missing fields
+      434 -        if draft and awaiting == "fields" and state.get("route
+          -") not in ("create", "provide_info"):                         
+      434 +        if draft and awaiting == "fields" and state.get("route
+          +") not in (                                                   
+      435 +            "create",                                         
+      436 +            "provide_info",                                   
+      437 +            "clarified",                                      
+      438 +        ):                                                    
+      439              missing = " and ".join(FIELD_LABELS[m] for m in mi
+           ssing_required(draft))
+      440              name = f" '{draft['project_name']}'" if draft.get(
+           "project_name") else ""
+      441              parts.append(
+⏺ Update(project_agent/graph/routing.py)
+  ⎿  Added 1 line
+       9  PARSE_ROUTES = {
+      10      "create": "merge_draft",
+      11      "provide_info": "merge_draft",
+      12 +    "clarified": "merge_draft",  # answer to "project name or c
+         +ustomer?"                                                      
+      13      "list": "list_projects",
+      14      "get": "resolve_project",
+      15      "update": "resolve_project",
+
+⏺ Update(project_agent/graph/routing.py)
+  ⎿  Added 2 lines
+      31 
+      32 
+      33  def check_required(state: AgentState) -> str:
+      34 +    if state.get("awaiting") == "clarify_field":               
+      35 +        return "ask_clarify"  # a value needs a home before any
+         +thing is saved                                                 
+      36      return "ask_missing" if missing_required(state.get("draft")
+           or {}) else "save_project"
+      37 
+      38 
+
+⏺ Update(project_agent/graph/builder.py)
+  ⎿  Added 1 line
+      24      for name in (
+      25          "parse_input",
+      26          "merge_draft",
+      27 +        "ask_clarify",                                         
+      28          "ask_missing",
+      29          "save_project",
+      30          "list_projects",
+
+⏺ Update(project_agent/graph/builder.py)
+  ⎿  Added 4 lines, removed 2 lines
+      44      g.add_edge(START, "parse_input")
+      45      g.add_conditional_edges("parse_input", route_after_parse, s
+          orted(set(PARSE_ROUTES.values())))
+      46 
+      47 -    # Create flow: merge -> (missing? ask : save)              
+      48 -    g.add_conditional_edges("merge_draft", check_required, ["as
+         -k_missing", "save_project"])                                   
+      47 +    # Create flow: merge -> (ambiguous? clarify : missing? ask 
+         +: save)                                                        
+      48 +    g.add_conditional_edges(                                   
+      49 +        "merge_draft", check_required, ["ask_clarify", "ask_mis
+         +sing", "save_project"]                                         
+      50 +    )                                                          
+      51 
+      52      # Existing-project flow: resolve -> get/update/delete (or f
+          inalize if not resolved)
+      53      g.add_conditional_edges(
+
+⏺ Update(project_agent/graph/builder.py)
+  ⎿  Added 1 line
+      55      )
+      56 
+      57      for name in (
+      58 +        "ask_clarify",                                         
+      59          "ask_missing",
+      60          "save_project",
+      61          "list_projects",
+
+⏺ Picking a field will now also clear that value from the other field, so the
+  safety check doesn't loop on the same answer forever. · summary
+
+⏺ Update(project_agent/graph/nodes.py)
+  ⎿  Added 8 lines, removed 1 line
+      80              picked = self._match_field_answer(low, pending.get(
+          "fields", []))
+      81              if picked:
+      82                  value = pending["value"]
+      83 +                draft = state.get("draft") or {}               
+      84 +                # The value belongs ONLY to the picked field(s)
+         +: drop it from the others.                                     
+      85 +                stale = [                                      
+      86 +                    f                                          
+      87 +                    for f in pending.get("fields", [])         
+      88 +                    if f not in picked and (draft.get(f) or "")
+         +.casefold() == value.casefold()                                
+      89 +                ]                                              
+      90                  return {
+      91                      "route": "clarified",
+      92                      "awaiting": None,
+      93                      "pending_op": None,
+      94                      "allow_same": len(picked) > 1,
+      95                      "parsed": ParsedInput.make(
+      89 -                        "provide_info", **{f: value for f in pi
+         -cked}                                                          
+      96 +                        "provide_info", clear_fields=stale, **{
+         +f: value for f in picked}                                      
+      97                      ).model_dump(),
+      98                  }
+      99 
+
+⏺ Write(tests/test_corrections.py)
+  ⎿  Wrote 164 lines to tests/test_corrections.py
+       1 """Ambiguous names must be asked about, and corrections must rem
+         ove the wrong field."""
+       2 
+       3 from fakes import P
+       4 
+       5 
+       6 # --------------------------------------------------------------
+         --- corrections
+       7 def test_correction_clears_wrong_field(bot, parser, repo):
+       8     """The reported bug: 'Dresswell is not the project name, it'
+     … +157 lines (~6 KB) (ctrl+o to expand)
+
+  Ran 1 shell command (ctrl+o to expand)
+
+⏺ All 51 tests pass (39 existing + 12 new). I'll add the two Dresswell cases to
+  the live check script, then update the README with a transcript produced by
+  the real app code.
+
+⏺ Update(scripts/check_llm.py)
+  ⎿  Added 6 lines
+      20      ("Siam Corp",
+      21       '- Project draft in progress: {"project_name": "Office Fit
+          -out"}\n'
+      22       "- The assistant just asked the user for: customer"),
+      23 +    ("Dresswell",  # should be ambiguous_value, not a guess    
+      24 +     '- Project draft in progress: {"location": "Bangkok"}\n'  
+      25 +     "- The assistant just asked the user for: project name and
+         + customer"),                                                   
+      26 +    ("Dresswell is not the project name, it's the customer",  #
+         + should clear project_name                                     
+      27 +     '- Project draft in progress: {"project_name": "Dresswell"
+         +}\n'                                                           
+      28 +     "- The assistant just asked the user for: customer"),     
+      29      ("mark Website Redesign as in progress", "- No pending ques
+          tion."),
+      30      ("what's the weather like?", "- No pending question."),
+      31  ]
+
+⏺ Update(scripts/check_llm.py)
+  ⎿  Added 4 lines, removed 1 line
+      46              print(f"ERROR: {exc}")
+      47              return 1
+      48          fields = {k: v for k, v in parsed.fields.model_dump().i
+          tems() if v}
+      49 -        print(f"> {text}\n  intent={parsed.intent} ref={parsed.
+         -project_ref} fields={fields}\n")                               
+      49 +        print(                                                 
+      50 +            f"> {text}\n  intent={parsed.intent} ref={parsed.pr
+         +oject_ref} fields={fields} "                                   
+      51 +            f"clear={parsed.clear_fields} ambiguous={parsed.amb
+         +iguous_value}\n"                                               
+      52 +        )                                                      
+      53      return 0
+      54 
+      55 
+
+  Ran 1 shell command (ctrl+o to expand)
+
+⏺ Both flows now behave as intended. Updating the README:
+
+⏺ Update(README.md)
+  ⎿  Added 3 lines
+      10  **Features**
+      11  - **Create** a project from natural language. `project_name` an
+          d `customer` are required.
+      12    If either is missing, the app asks for it over the next turns
+           before saving.
+      13 +- **Never guesses.** If it isn't clear whether a name is the pr
+         +oject name or the customer,                                    
+      14 +  the app asks. **Corrections work:** *"Dresswell is not the pr
+         +oject name, it's the                                           
+      15 +  customer"* removes the wrong field from the draft.           
+      16  - Optional fields: `start_date`, `location`, `status`, `notes`.
+      17  - **List** all projects, with a clear message when there are no
+          ne.
+      18  - **Get**, **update** and **delete** a project by ID (`P-001`)
+          or name. If a name matches
+
+⏺ Update(README.md)
+  ⎿  Couldn't edit file
+
+⏺ Update(README.md)
+  ⎿  Added 2 lines, removed 2 lines
+      123  - *Per turn:* `user_input`, `parsed`, `route`, `op`, `target_i
+           d`, `changes`, `notes`,
+      124    `response`.
+      125  - *Remembered between turns:* `draft` (the half-built project)
+           , `awaiting` (`fields`,
+      126 -  `which_project` or `confirm_delete`) and `pending_op` (e.g. 
+          -the candidates for "which                                     
+      127 -  one?"). These are kept by LangGraph's `InMemorySaver` checkp
+          -ointer under one `thread_id`.                                 
+      126 +  `clarify_field`, `which_project` or `confirm_delete`) and `p
+          +ending_op` (e.g. the                                          
+      127 +  candidates for "which one?", or the value waiting for "proje
+          +ct name or customer?"). These are kept by LangGraph's `InMemor
+          +ySaver` checkpointer under one `thread_id`.                   
+      128 
+      129  **Multi-turn slot filling:**
+      130  1. `parse_input` sends your message to the LLM along with cont
+           ext: the current draft and
+
+⏺ Update(README.md)
+  ⎿  Added 17 lines, removed 5 lines
+      131     the field the app just asked for. That's how a bare reply l
+           ike `Siam Retail Co.` is
+      132     understood as `customer`.
+      133  2. `merge_draft` validates the new fields (dates must be `YYYY
+           -MM-DD`, status must be a
+      134 -   known value) and adds them to the draft without erasing ear
+          -lier ones.                                                    
+      135 -3. The `check_required` edge looks for `project_name` and `cus
+          -tomer` in plain code. If                                      
+      136 -   either is missing, `ask_missing` asks for it and the draft 
+          -waits in state. Otherwise                                     
+      137 -   `save_project` writes it to `projects.json`.               
+      138 -4. If you type a different command while a draft is waiting, i
+          -t runs normally and                                           
+      134 +   known value). It removes any fields listed in `clear_fields
+          +` (corrections like                                           
+      135 +   *"X is not the project name"* or *"remove the location"*), 
+          +then adds the new values.                                     
+      136 +3. **No guessing:**                                           
+      137 +   - If the LLM can't tell which field a value belongs to, it 
+          +returns it as                                                 
+      138 +     `ambiguous_value` and the app asks *"Is 'Dresswell' the p
+          +roject name or the                                            
+      139 +     customer?"*.                                             
+      140 +   - As a check that doesn't depend on the LLM, the app also a
+          +sks if the project name                                       
+      141 +     and the customer end up identical.                       
+      142 +   - The replies `project name`, `customer` and `both` are mat
+          +ched without calling the                                      
+      143 +     LLM. `both` is how you confirm a project really is named 
+          +after its customer.                                           
+      144 +4. The `check_required` edge routes to `ask_clarify` if a valu
+          +e still needs a home. Next                                    
+      145 +   it looks for `project_name` and `customer` in plain code: i
+          +f either is missing,                                          
+      146 +   `ask_missing` asks for it and the draft waits in state. Oth
+          +erwise `save_project`                                         
+      147 +   writes it to `projects.json`.                              
+      148 +5. If you type a different command while a draft is waiting, i
+          +t runs normally and                                           
+      149     `finalize` adds a reminder about the unfinished draft. `can
+           cel` throws the draft away.
+      150 +   If you move on while a "project name or customer?" question
+          + is open, that one value is                                   
+      151 +   set aside, with a note, and the rest of the draft is kept. 
+      152 
+      153  **Safety and robustness:**
+      154  - `cancel`, `help`, `list`, `yes`/`no` and choosing by number
+           or ID are matched without
+
+⏺ Update(README.md)
+  ⎿  Added 27 lines, removed 1 line
+      244  Deleted P-001 'Office Fit-out'.
+      245  ```
+      246 
+      247 -### Session 3: unclear input and exit                         
+      247 +### Session 3: an ambiguous name, and correcting a mistake    
+      248 
+      249  ```text
+      250 +> Start a new project in Bangkok                              
+      251 +Got it (location: Bangkok). What's the project name, and who i
+          +s the customer?                                               
+      252 +                                                              
+      253 +> Dresswell                                                   
+      254 +Got it (location: Bangkok). Is 'Dresswell' the project name or
+          + the customer? (Reply "project name", "customer", or "both".) 
+      255 +                                                              
+      256 +> customer                                                    
+      257 +Got it (location: Bangkok, customer: Dresswell). What's the pr
+          +oject name?                                                   
+      258 +                                                              
+      259 +> Summer Lookbook                                             
+      260 +Saved P-001  Summer Lookbook — Dresswell  [Bangkok]           
+      261 +                                                              
+      262 +> new project Dresswell                                       
+      263 +Got it (project name: Dresswell). Who is the customer?        
+      264 +                                                              
+      265 +> Dresswell is not the project name, it's the customer        
+      266 +Removed project name 'Dresswell'.                             
+      267 +Got it (customer: Dresswell). What's the project name?        
+      268 +                                                              
+      269 +> Autumn Campaign                                             
+      270 +Saved P-002  Autumn Campaign — Dresswell                      
+      271 +```                                                           
+      272 +                                                              
+      273 +### Session 4: unclear input and exit                         
+      274 +                                                              
+      275 +```text                                                       
+      276  > what's the weather tomorrow?
+      277  Sorry, I didn't understand that. You can create, list, show, u
+           pdate or delete projects — for example "list" or "new project
+           Apollo for Acme". Type "help" for more.
+      278 
+
+⏺ Update(README.md)
+  ⎿  Added 2 lines, removed 2 lines
+      92 
+      93  The tests replace the LLM with a `FakeParser` (`tests/fakes.py`
+          ) that returns scripted
+      94  answers. They cover storage, multi-turn creation, switching com
+          mands mid-draft,
+      95 -cancelling, choosing between same-named projects, delete confir
+         -mation, LLM outages and the                                    
+      96 -console loop.                                                  
+      95 +cancelling, ambiguous names, corrections, choosing between same
+         +-named projects, delete                                        
+      96 +confirmation, LLM outages and the console loop.                
+      97 
+      98  ---
+      99 
+
+  Ran 1 shell command (ctrl+o to expand)
+
+⏺ The diagram edit didn't match the file exactly. I'll fix it from the actual
+  text.
+
+  Searched for 1 pattern (ctrl+o to expand)
+
+⏺ Update(README.md)
+  ⎿  Added 2 lines, removed 1 line
+      104  dictionary passed between nodes.
+      105 
+      106  ```
+      107 -START → parse_input ──┬─ create / provide_info → merge_draft ─
+          -┬─ missing → ask_missing ──┐                                  
+      107 +START → parse_input ──┬─ create / provide_info → merge_draft ─
+          +┬─ ambiguous → ask_clarify ┐                                  
+      108 +                      │    / clarified                        
+          +├─ missing → ask_missing ───┤                                 
+      109                        │
+           └─ complete → save_project ─┤
+      110                        ├─ list ──────────────→ list_projects ──
+           ────────────────────────────┤
+      111                        ├─ get/update/delete ─→ resolve_project
+           ─┬─ 1 match → show_project ─┤
+⏺ Both bugs are fixed and all 51 tests pass offline (39 existing plus 12 new). I
+  haven't checked the real model yet: whether it marks a bare Dresswell as
+  unclear depends on the prompt, so please run python scripts/check_llm.py once
+  with your key in .env.
+
+  Why it happened: the model had no way to say "I'm not sure which field this
+  is" or "remove this field", and the draft code could only add values, never
+  take them away.
+
+  What changed:
+  1. Ambiguous names get a question, not a guess. The model now has an
+     ambiguous_value field and is told never to guess. You get: "Is 'Dresswell' 
+     the project name or the customer? (Reply "project name", "customer", or 
+     "both".)" Those three replies are matched in plain code, without calling
+     the model. both lets a project really be named after its customer.
+  2. Corrections now remove the wrong field. The model now has a clear_fields
+     list. "Dresswell is not the project name, it's the customer" now gives
+     "Removed project name 'Dresswell'." and then asks for the real project
+     name. "remove the location" works the same way.
+  3. A check that doesn't depend on the model. If the project name and customer
+     end up identical, nothing is saved and the app asks. This blocks your exact
+     bug even if the model misses the correction. A test covers that case.
+  4. No endless loop. After you pick a field, the value is removed from the
+     other field, so the check can't fire again on the same value.
+  5. Moving on mid-question: if you type another command while "project name or
+     customer?" is open, that one value is set aside with a note, and the rest
+     of the draft is kept.
+
+  scripts/check_llm.py now includes both Dresswell sentences and prints clear=
+  and ambiguous= for each sample. For the bare Dresswell, you should see
+  ambiguous=Dresswell. For the correction, you should see clear=['project_name']
+  and customer=Dresswell. If the model still guesses on the bare name, the
+  plain-code check catches the case where both fields end up identical, but not
+  every guess. Tightening the examples in project_agent/graph/prompts.py would
+  be the next step.
+
+  The README has a new Session 3 that walks through both flows, plus an updated
+  graph diagram and slot-filling explanation.
+
+  The main changes are in project_agent/graph/nodes.py, project_agent/models.py
+  and project_agent/graph/prompts.py, with smaller edits to the state, routing
+  and builder files. The new tests are in tests/test_corrections.py.
+
+✻ Cogitated for 2m 57s · done 4:19 PM
+
+※ recap: You're building a console project assistant with LangGraph and OpenRouter, and I just fixed ambiguous-name guessing and field corrections, with all 51 tests passing. Next, add your key to .env and run python scripts/check_llm.py to check the real model.
+
+❯ Can you update the CLI output format to be a bit cleaner and match this       
+  style?                                                                        
+                                                                                
+  > create a project called Alpha for customer Acme                             
+  Done. Created project "Alpha" for customer Acme.                              
+                                                                                
+  > list projects                                                               
+  Here are your projects (2):                                                   
+  1. Alpha — customer: Acme                                                     
+  2. Beta — customer: Globex                                                    
+                                                                                
+  If optional fields are set, include them concisely (and skip them if empty).  
+
+⏺ Exception E5 (re-entry): this is a new requirement on an approved plan, so I'm
+  re-planning only the output format, starting at Phase 4. Phase 5 is cut to
+  one line because there's nothing external to look up.
+
+  You've already set the style: a "Done." sentence for actions, and a numbered
+  list with an em dash. One real decision remains. Your list shows 1. and 2. 
+  instead of IDs like P-001. Names already work for get, update and delete, so
+  hiding IDs is fine in most cases. But duplicate names are allowed, and then
+  two lines would look identical.
+
+  Phase 4: Options
+
+  Option: A. Your style exactly, IDs only for duplicate names
+  What it means in practice: 1. Alpha — customer: Acme. When two projects
+    share a name, each gets a small (P-002) tag
+  Pros: Matches your example. Duplicates can still be told apart.
+  Cons / tradeoffs: IDs are mostly hidden, so users mainly refer to projects
+    by name
+  Effort: S
+  Risk: Low
+  ────────────────────────────────────────
+  Option: B. Your style plus an ID on every line
+  What it means in practice: 1. Alpha (P-001) — customer: Acme
+  Pros: Always clear what to type
+  Cons / tradeoffs: Busier than your example
+  Effort: S
+  Risk: Low
+  ────────────────────────────────────────
+  Option: C. Your style exactly, never show IDs
+  What it means in practice: Exactly the sample
+  Pros: Simplest
+  Cons / tradeoffs: Two "Website Redesign" lines look identical. You'd only
+    find out which is which at the "which one?" question.
+  Effort: S
+  Risk: Med
+
+  Recommendation
+
+  Choose Option A. It looks exactly like your example in the normal case, and
+  avoids identical lines when names repeat. If you mostly work with IDs, choose
+  B.
+
+  What the output would look like (all replies, so the whole app matches):
+  > create a project called Alpha for customer Acme
+  Done. Created project "Alpha" for customer Acme.
+
+  > create Beta for Globex, active, starting Dec 1 in Bangkok
+  Done. Created project "Beta" for customer Globex (status: active, start: 
+  2026-12-01, location: Bangkok).
+
+  > list projects
+  Here are your projects (2):
+  1. Alpha — customer: Acme
+  2. Beta — customer: Globex · status: active · start: 2026-12-01 · location: 
+  Bangkok
+
+  > list projects                         (when empty)
+  You don't have any projects yet. Try: "create a project called Alpha for 
+  customer Acme".
+
+  > show Beta
+  Project "Beta" — customer: Globex
+  Status: active · Start: 2026-12-01 · Location: Bangkok · Notes: …
+
+  > change Beta location to Chiang Mai
+  Done. Updated project "Beta": location → Chiang Mai.
+
+  > delete Beta
+  Delete project "Beta" (customer: Globex)? This cannot be undone. Type "yes" or
+  "no".
+  > yes
+  Done. Deleted project "Beta".
+  - Empty optional fields are left out.
+  - Notes longer than about 60 characters are shortened with "…" in the list.
+    The full text shows in show.
+  - The "which one?" question uses the same numbered style, and you still answer
+    it with a number.
+
+  Phase 5 (research): Skip. This is only text formatting inside our own code.
+
+  Phase 6: Self-evaluation
+
+  Assumption: The new style applies to every reply
+    (create/update/delete/get/which-one), not just the two you showed
+  Status: Guess (keeps the app consistent)
+  ────────────────────────────────────────
+  Assumption: 1./2. in the list are display numbers only. "delete 2" won't
+    mean "the 2nd in the last list".
+  Status: Guess. Supporting that would tie commands to the most recent list,
+    which risks deleting the wrong project.
+  ────────────────────────────────────────
+  Assumption: Separate optional fields with ·, and label them status, start,
+    location, notes
+  Status: Guess (easy to change)
+
+  Error check: about 15 tests check exact output text, so they'll need updating
+  along with the README transcripts. The behaviour itself, including the
+  Dresswell fixes and delete confirmation, doesn't change.
+
+  Best plan (ready to execute)
+
+  1. Rewrite project_agent/formatting.py: list lines, a one-line project
+     summary, the detail view, the "Done. Created…" sentence, and the empty-list
+     text → done when the output matches the examples above.
+  2. Switch the replies in nodes.py
+     (save/update/delete/confirm/which-one/duplicate note) to the new wording →
+     done when a scripted run matches.
+  3. Update the tests that check exact text, and add tests for: optional fields
+     shown or skipped, the ID tag only on duplicate names, and long notes
+     shortened → done when pytest passes.
+  4. Regenerate the README example sessions from the real app code → done when
+     the README transcripts match the actual output.
+
+  Out of scope for now: making "delete 2" refer to the last list.
+  Research status: Skipped. Formatting only.
+
+  Proceed with this plan? (yes / change X / stop)
+
+✻ Crunched for 25s · done 4:29 PM
+
+❯ Go with option C                                                              
+
+⏺ Going with Option C: IDs never appear in any output. They still work if
+  someone types them (e.g. show P-001), but nothing in the app mentions them
+  anymore, including the help text. One thing to know: two projects with the
+  same name and customer will look identical in lists. When that happens, the
+  "which one?" question still lets you pick by number.
+
+⏺ Write(project_agent/formatting.py)
+  ⎿  Added 60 lines, removed 15 lines
+       1 -"""Turn projects into readable console text."""                
+       1 +"""Turn projects into readable console text.                   
+       2 
+       3 +Style:                                                         
+       4 +    Done. Created project "Alpha" for customer Acme.           
+       5 +    Here are your projects (2):                                
+       6 +    1. Alpha — customer: Acme                                  
+       7 +    2. Beta — customer: Globex · status: active · start: 2026-1
+         +2-01                                                           
+       8 +                                                               
+       9 +Empty optional fields are always skipped. Internal IDs are neve
+         +r shown.                                                       
+      10 +"""                                                            
+      11 +                                                               
+      12  from __future__ import annotations
+      13 
+      14  from .models import FIELD_LABELS, Project
+      15 
+      16 +NOTES_PREVIEW_CHARS = 60                                       
+      17 
+      18 +# Short labels for optional fields, in display order.          
+      19 +_OPTIONAL_LABELS = (                                           
+      20 +    ("status", "status"),                                      
+      21 +    ("start_date", "start"),                                   
+      22 +    ("location", "location"),                                  
+      23 +    ("notes", "notes"),                                        
+      24 +)                                                              
+      25 +                                                               
+      26 +                                                               
+      27 +def _shorten(text: str, limit: int = NOTES_PREVIEW_CHARS) -> st
+         +r:                                                             
+      28 +    text = " ".join(text.split())  # collapse newlines/extra sp
+         +aces                                                           
+      29 +    return text if len(text) <= limit else text[: limit - 1].rs
+         +trip() + "…"                                                   
+      30 +                                                               
+      31 +                                                               
+      32 +def _optional_parts(p: Project, short_notes: bool = True, capit
+         +alize: bool = False) -> list[str]:                             
+      33 +    parts = []                                                 
+      34 +    for field, label in _OPTIONAL_LABELS:                      
+      35 +        value = getattr(p, field)                              
+      36 +        if not value:                                          
+      37 +            continue                                           
+      38 +        if field == "notes" and short_notes:                   
+      39 +            value = _shorten(value)                            
+      40 +        parts.append(f"{label.capitalize() if capitalize else l
+         +abel}: {value}")                                               
+      41 +    return parts                                               
+      42 +                                                               
+      43 +                                                               
+      44  def project_line(p: Project) -> str:
+       9 -    extras = [x for x in (p.status, p.start_date and f"starts {
+         -p.start_date}", p.location) if x]                              
+      10 -    tail = f"  [{', '.join(extras)}]" if extras else ""        
+      11 -    return f"{p.id}  {p.project_name} — {p.customer}{tail}"    
+      45 +    """'Beta — customer: Globex · status: active · start: 2026-
+         +12-01'"""                                                      
+      46 +    return " · ".join([f"{p.project_name} — customer: {p.custom
+         +er}", *_optional_parts(p)])                                    
+      47 
+      48 
+      49 +def numbered(projects: list[Project]) -> str:                  
+      50 +    return "\n".join(f"{i}. {project_line(p)}" for i, p in enum
+         +erate(projects, 1))                                            
+      51 +                                                               
+      52 +                                                               
+      53  def project_list(projects: list[Project]) -> str:
+      54      if not projects:
+      55          return (
+      17 -            "No projects yet.\n"                               
+      18 -            "Try: \"Create a project called Website Redesign fo
+         -r Acme Corp\"."                                                
+      56 +            "You don't have any projects yet. "                
+      57 +            "Try: \"create a project called Alpha for customer 
+         +Acme\"."                                                       
+      58          )
+      20 -    noun = "project" if len(projects) == 1 else "projects"     
+      21 -    lines = [f"{len(projects)} {noun}:"] + [f"  {project_line(p
+         -)}" for p in projects]                                         
+      22 -    return "\n".join(lines)                                    
+      59 +    return f"Here are your projects ({len(projects)}):\n{number
+         +ed(projects)}"                                                 
+      60 
+      61 
+      62  def project_detail(p: Project) -> str:
+      26 -    rows = [("ID", p.id)]                                      
+      27 -    for field in ("project_name", "customer", "start_date", "lo
+         -cation", "status", "notes"):                                   
+      28 -        rows.append((FIELD_LABELS[field].capitalize(), getattr(
+         -p, field) or "—"))                                             
+      29 -    rows.append(("Updated", p.updated_at))                     
+      30 -    width = max(len(label) for label, _ in rows)               
+      31 -    return "\n".join(f"  {label.ljust(width)} : {value}" for la
+         -bel, value in rows)                                            
+      63 +    header = f'Project "{p.project_name}" — customer: {p.custom
+         +er}'                                                           
+      64 +    extras = _optional_parts(p, short_notes=False, capitalize=T
+         +rue)                                                           
+      65 +    return header + ("\n" + " · ".join(extras) if extras else "
+         +")                                                             
+      66 
+      67 
+      68 +def created_message(p: Project) -> str:                        
+      69 +    extras = _optional_parts(p)                                
+      70 +    tail = f" ({', '.join(extras)})" if extras else ""         
+      71 +    return f'Done. Created project "{p.project_name}" for custo
+         +mer {p.customer}{tail}.'                                       
+      72 +                                                               
+      73 +                                                               
+      74 +def updated_message(old_name: str, changes: dict) -> str:      
+      75 +    what = ", ".join(f"{FIELD_LABELS.get(k, k)} → {v}" for k, v
+         + in changes.items())                                           
+      76 +    return f'Done. Updated project "{old_name}": {what}.'      
+      77 +                                                               
+      78 +                                                               
+      79  def describe_fields(fields: dict) -> str:
+      80      """{'location': 'Bangkok'} -> 'location: Bangkok'"""
+      81      return ", ".join(f"{FIELD_LABELS.get(k, k)}: {v}" for k, v
+          in fields.items())
+
+  Searched for 1 pattern, read 1 file (ctrl+o to expand)
+
+⏺ Now the replies in nodes.py:
+
+⏺ Update(project_agent/graph/nodes.py)
+  ⎿  Added 9 lines, removed 1 line
+       5  import json
+       6  from typing import Optional
+       7 
+       8 -from ..formatting import describe_fields, project_detail, proje
+         -ct_line, project_list                                          
+       8 +from ..formatting import (                                     
+       9 +    created_message,                                           
+      10 +    describe_fields,                                           
+      11 +    numbered,                                                  
+      12 +    project_detail,                                            
+      13 +    project_line,                                              
+      14 +    project_list,                                              
+      15 +    updated_message,                                           
+      16 +)                                                              
+      17  from ..llm import InputParser, LLMUnavailableError
+      18  from ..models import (
+      19      FIELD_LABELS,
+
+⏺ Update(project_agent/graph/nodes.py)
+  ⎿  Added 2 lines, removed 2 lines
+      44  Here's what I can do (just type normally):
+      45    • Create:  "New project Website Redesign for Acme Corp, start
+          ing 2026-12-01 in Bangkok"
+      46    • List:    "list" or "show my projects"
+      47 -  • Get:     "show P-001" or "details of Website Redesign"     
+      47 +  • Get:     "show Website Redesign"                           
+      48    • Update:  "set Website Redesign status to active"
+      49 -  • Delete:  "delete P-001" (I'll always ask you to confirm)   
+      49 +  • Delete:  "delete Website Redesign" (I'll always ask you to 
+         +confirm)                                                       
+      50    • cancel:  abandon an unfinished project or pending question
+      51    • quit / exit: leave the app
+      52  Required for a new project: project name and customer.
+
+⏺ Update(project_agent/graph/nodes.py)
+  ⎿  Added 3 lines, removed 8 lines
+      306              project = self.repo.add(draft)
+      307          except StorageError as exc:
+      308              return {"response": f"{exc}\nYour draft is kept — 
+           please try again."}
+      309 +        response = created_message(project)                   
+      310          if same_name:
+      310 -            ids = ", ".join(p.id for p in same_name)          
+      311 -            notes.append(f"Note: another project already has t
+          -his name ({ids}).")                                           
+      312 -        return {                                              
+      313 -            "draft": None,                                    
+      314 -            "awaiting": None,                                 
+      315 -            "notes": notes,                                   
+      316 -            "response": f"Saved {project_line(project)}",     
+      317 -        }                                                     
+      311 +            response += f'\nNote: you now have more than one p
+          +roject named "{project.project_name}".'                       
+      312 +        return {"draft": None, "awaiting": None, "notes": note
+          +s, "response": response}                                      
+      313 
+      314      # ===================================================== ex
+           isting projects
+      315      def list_projects(self, state: AgentState) -> AgentState:
+
+⏺ Update(project_agent/graph/nodes.py)
+  ⎿  Added 1 line, removed 1 line
+      320              pending = state.get("pending_op") or {}
+      321              if not state.get("target_id"):
+      322                  n = len(pending.get("candidates", []))
+      323 -                return {"response": f"Please reply with a numb
+          -er from 1 to {n}, or a project ID."}                          
+      323 +                return {"response": f"Please reply with a numb
+          +er from 1 to {n}."}                                           
+      324              return {
+      325                  "op": pending.get("op"),
+      326                  "changes": pending.get("changes"),
+
+⏺ Update(project_agent/graph/nodes.py)
+  ⎿  Added 2 lines, removed 3 lines
+      338          if not ref:
+      339              return {
+      340                  "notes": notes,
+      341 -                "response": f"Which project do you want to {op
+          -}? Give its name or ID "                                      
+      341 +                "response": f"Which project do you want to {op
+          +}? Tell me its name "                                         
+      342                  "(type \"list\" to see them).",
+      343              }
+      344 
+     ...
+      346          if not matches:
+      347              return {
+      348                  "notes": notes,
+      349 -                "response": f"I couldn't find a project matchi
+          -ng '{ref}'. "                                                 
+      349 +                "response": f'I couldn\'t find a project match
+          +ing "{ref}". '                                                
+      350                  "Type \"list\" to see all projects.",
+      351              }
+      352          if len(matches) > 1:
+      353 -            options = "\n".join(f"  {i}. {project_line(p)}" fo
+          -r i, p in enumerate(matches, 1))                              
+      353              return {
+      354                  "notes": notes,
+      355                  "awaiting": "which_project",
+
+⏺ Update(project_agent/graph/nodes.py)
+  ⎿  Added 2 lines, removed 2 lines
+      358                      "changes": changes,
+      359                      "candidates": [p.id for p in matches],
+      360                  },
+      361 -                "response": f"I found {len(matches)} projects 
+          -matching '{ref}':\n{options}\n"                               
+      362 -                f"Which one do you want to {op}? (number or ID
+          -)",                                                           
+      361 +                "response": f'I found {len(matches)} projects 
+          +matching "{ref}":\n'                                          
+      362 +                f"{numbered(matches)}\nWhich one do you want t
+          +o {op}? (reply with the number)",                             
+      363              }
+      364          return {"notes": notes, "op": op, "target_id": matches
+           [0].id, "changes": changes}
+      365 
+
+⏺ Update(project_agent/graph/nodes.py)
+  ⎿  Added 8 lines, removed 6 lines
+      371 
+      372      def update_project(self, state: AgentState) -> AgentState:
+      373          pid = state["target_id"]
+      374 +        current = self.repo.get(pid)                          
+      375 +        if current is None:                                   
+      376 +            return {"response": "That project no longer exists
+          +."}                                                           
+      377 +        name = current.project_name                           
+      378          changes = state.get("changes") or {}
+      379          if not changes:
+      380              return {
+      377 -                "response": f"What would you like to change on
+          - {pid}? For example: "                                        
+      378 -                f"\"set {pid} status to active\" or \"change {
+          -pid} location to Chiang Mai\"."                               
+      381 +                "response": f'What would you like to change on
+          + "{name}"? For example: '                                     
+      382 +                f'"set {name} status to active" or "change {na
+          +me} location to Chiang Mai".'                                 
+      383              }
+      384          try:
+      381 -            project = self.repo.update(pid, changes)          
+      382 -        except KeyError:                                      
+      383 -            return {"response": "That project no longer exists
+          -."}                                                           
+      385 +            self.repo.update(pid, changes)                    
+      386          except StorageError as exc:
+      387              return {"response": f"{exc}\nNothing was changed."
+           }
+      386 -        return {"response": f"Updated {pid} ({describe_fields(
+          -changes)}).\n{project_detail(project)}"}                      
+      388 +        return {"response": updated_message(name, changes)}   
+      389 
+      390      def confirm_delete(self, state: AgentState) -> AgentState:
+      391          project = self.repo.get(state["target_id"])
+
+⏺ Update(project_agent/graph/nodes.py)
+  ⎿  Added 3 lines, removed 3 lines
+      391          project = self.repo.get(state["target_id"])
+      392          if project is None:
+      393              return {"response": "That project no longer exists
+           ."}
+      394 -        label = f"{project.id} '{project.project_name}'"      
+      394 +        label = f'project "{project.project_name}"'           
+      395          return {
+      396              "awaiting": "confirm_delete",
+      397              "pending_op": {"op": "delete", "target_id": projec
+           t.id, "label": label},
+      398 -            "response": f"Delete {project_line(project)}?\n"  
+      399 -            "This cannot be undone. Type \"yes\" to delete or 
+          -\"no\" to keep it.",                                          
+      398 +            "response": f'Delete project "{project.project_nam
+          +e}" (customer: {project.customer})? '                         
+      399 +            "This cannot be undone. Type \"yes\" or \"no\".", 
+      400          }
+      401 
+      402      def delete_project(self, state: AgentState) -> AgentState:
+
+⏺ Update(project_agent/graph/nodes.py)
+  ⎿  Added 6 lines, removed 2 lines
+      408              return {**cleared, "response": "That project no lo
+           nger exists."}
+      409          except StorageError as exc:
+      410              return {**cleared, "response": f"{exc}\nNothing wa
+           s deleted."}
+      411 -        return {**cleared, "response": f"Deleted {project.id} 
+          -'{project.project_name}'."}                                   
+      411 +        return {**cleared, "response": f'Done. Deleted project
+          + "{project.project_name}".'}                                  
+      412 
+      413      def cancel_delete(self, state: AgentState) -> AgentState:
+      414          label = (state.get("pending_op") or {}).get("label", "
+           the project")
+      415 -        return {"awaiting": None, "pending_op": None, "respons
+          -e": f"OK, {label} was not deleted."}                          
+      415 +        return {                                              
+      416 +            "awaiting": None,                                 
+      417 +            "pending_op": None,                               
+      418 +            "response": f"OK, I kept {label}. Nothing was dele
+          +ted.",                                                        
+      419 +        }                                                     
+      420 
+      421      # ========================================================
+           ======== misc
+      422      def cancel_pending(self, state: AgentState) -> AgentState:
+
+  Ran 1 shell command (ctrl+o to expand)
+
+⏺ The 20 failures are all exact-reply-text tests; I'm switching the remaining
+  replies to double-quoted project names before updating those tests. · summary
+
+  Searched for 1 pattern, ran 1 shell command (ctrl+o to expand)
+
+⏺ Now I'll update the tests to the new wording, and add tests for the new format
+  itself:
+
+  Ran 1 shell command (ctrl+o to expand)
+
+⏺ My update script stopped because one phrase appears several times in
+  test_corrections.py, so I'm rerunning it on the other two files to replace
+  every occurrence. · summary
+
+  Ran 1 shell command (ctrl+o to expand)
+
+⏺ All 60 tests pass (51 updated + 9 new formatting tests). Next I'll check that
+  no reply can still show an ID, and regenerate the README sessions from the
+  real app code:
+  Ran 1 shell command (ctrl+o to expand)
+
+⏺ No reply shows an ID anymore (the grep found nothing). Now the README:
+
+  Searched for 2 patterns, read 1 file, ran 1 shell command (ctrl+o to expand)
+
+⏺ Update(README.md)
+  ⎿  Added 3 lines, removed 1 line
+      14    the app asks. **Corrections work:** *"Dresswell is not the pr
+          oject name, it's the
+      15    customer"* removes the wrong field from the draft.
+      16  - Optional fields: `start_date`, `location`, `status`, `notes`.
+      17 -- **List** all projects, with a clear message when there are no
+         -ne.                                                            
+      17 +- **List** all projects, with a clear message when there are no
+         +ne. Output is short and                                        
+      18 +  plain: `1. Alpha — customer: Acme · status: active`. Empty op
+         +tional fields are left                                         
+      19 +  out, and internal IDs are never shown.                       
+      20  - **Get**, **update** and **delete** a project by name. If a na
+          me matches
+      21    several projects, the app asks which one. **Deleting always n
+          eeds an explicit `yes`.**
+      22  - Unclear input, network or API failures, and a damaged data fi
+          le all get a friendly
+
+  Searched for 1 pattern (ctrl+o to expand)
+
+⏺ Update(README.md)
+  ⎿  Added 2 lines
+      290  - An unfinished draft lives in memory only. It's lost if you q
+           uit before saving; saved
+      291    projects are always in `projects.json`.
+      292  - Updates set new values but can't clear a field back to empty
+           .
+      293 +- IDs are hidden, so two projects with the same name *and* cus
+          +tomer look identical in                                       
+      294 +  lists. When you get, update or delete one, the app asks whic
+          +h one and you pick by number.                                 
+      295  - Single user, single process. Editing `projects.json` by hand
+            while the app runs may be
+      296    overwritten.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+⏺ The app's output now matches your example, with IDs never shown (Option C),
+  and all 60 tests pass. Here's your example as the app now prints it:
+
+  > create a project called Alpha for customer Acme
+  Done. Created project "Alpha" for customer Acme.
+
+  > list projects
+  Here are your projects (2):
+  1. Alpha — customer: Acme
+  2. Beta — customer: Globex
+
+  Optional fields appear only when set, and empty ones are left out:
+  - In the list they go after a ·, like 2. Beta — customer: Globex · status: 
+    active · start: 2026-12-01 · location: Bangkok.
+  - When a project is created they go in brackets, like Done. Created project 
+    "Beta" for customer Globex (status: active, start: 2026-12-01).
+  - Long notes are shortened to 60 characters with "…" in lists. show prints
+    them in full.
+
+  The other replies now use the same style:
+  - Show: Project "Beta" — customer: Globex, with the optional fields on a
+    second line.
+  - Update: Done. Updated project "Beta": location → Chiang Mai.
+  - Delete: Delete project "Beta" (customer: Globex)? This cannot be undone. 
+    Type "yes" or "no.", then Done. Deleted project "Beta".
+  - Empty list: You don't have any projects yet. Try: "create a project called 
+    Alpha for customer Acme".
+  - "Which one?" questions use the same numbered list, and you answer with the
+    number.
+  - Project names are in double quotes everywhere, and the help text no longer
+    mentions IDs.
+
+  None of the behaviour changed. The Dresswell fixes, delete confirmation and
+  draft reminders work as before, and typing an ID like show P-001 still works
+  even though it's never shown.
+
+  Tests: 20 existing tests were updated for the new wording. Most now compare
+  the whole reply, not just a fragment. There's a new tests/test_formatting.py
+  with 9 tests: your two examples, optional fields shown or skipped, shortened
+  notes, and a check that no reply ever shows an ID.
+
+  README: I regenerated the example sessions from the real app code. Session 2
+  now starts with your Alpha/Acme example. I also removed every ID mention and
+  added the identical-lines tradeoff to the Limitations section.
+
+  Most of the change is in project_agent/formatting.py, with the reply wording
+  in project_agent/graph/nodes.py.
+
+✻ Worked for 2m 58s · done 4:35 PM
+
+※ recap: You're building a LangGraph console project assistant, and the cleaner output format is done, with all 60 offline tests passing. Next, add your OpenRouter key to .env and run python scripts/check_llm.py to test the real model.
+
+❯ Fix the bug where user ask to                                                 
+  clear start date of <project name> but the app responded with Got it          
+  (customer: <project name>). What's the project name?                          
+
+⏺ I'll look into the cause first (read-only), then propose a fix.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+⏺ You have a key set up, so I'll send the problem sentence to the model and look
+  at what it returns. This doesn't change any files or data:
+
+  Ran 1 shell command (ctrl+o to expand)
+
+⏺ I found the cause. The live model shows two separate bugs:
+
+  What you typed: clear start date of Frank
+  What the model returned: update, project Frank, clear start_date ✅
+  What the app did: Ignored the clear. Updating an existing project only
+    applies new values, and clear_fields was only wired up for drafts. So
+    you'd get "What would you like to change on Frank?"
+  ────────────────────────────────────────
+  What you typed: clear start date of Dresswell
+  What the model returned: provide_info, customer="Dresswell", clear
+    start_date ❌
+  What the app did: With no draft open, the app turned that into a new project
+    with customer Dresswell, then asked for the project name. That's the reply
+    you saw.
+
+  Why the model got Dresswell wrong: the prompt describes clear_fields as being
+  for drafts only. Its worked example is literally "Dresswell is not the project
+  name, it's the customer", which I added in the last fix. So the model learned
+  "Dresswell = customer, clearing = draft".
+
+  Exception E5 (re-entry): only the clearing behaviour is being re-planned.
+  Phase 5 is cut to one line because the live model test already showed what's
+  going on.
+
+  Phase 4: Options
+
+  Option: A. Prompt fix only
+  What it means in practice: Say clearing works on existing projects too, and
+    use neutral example names
+  Pros: Small
+  Cons: The model can still slip, and the app still can't clear a field on an
+    existing project
+  Effort: S
+  Risk: High
+  ────────────────────────────────────────
+  Option: B. Prompt fix + clearing on update + a check in plain code
+  What it means in practice: A, plus updates apply clear_fields, plus: a clear
+    with no draft open always means an existing project
+  Pros: Fixes both bugs. Still correct when the model slips like it did for
+    Dresswell.
+  Cons: A little more code in parse and update
+  Effort: M
+  Risk: Low
+  ────────────────────────────────────────
+  Option: C. B + a fixed pattern for "clear X of Y"
+  What it means in practice: Also match clear/remove <field> of/from <project>
+    exactly, without calling the model
+  Pros: Your exact wording never depends on the model
+  Cons: A third layer; B already covers this case
+  Effort: M
+  Risk: Low
+
+  Recommendation
+
+  Choose Option B. Bug 1 needs code (A can't fix it). The plain-code check makes
+  the exact Dresswell reply you saw impossible, whatever the model returns. C
+  is extra safety you probably don't need. Pick C if you want "clear X of Y"
+  handled with no model call at all.
+
+  The fix in plain terms:
+  1. Updates apply clears. Optional fields (start date, location, status, notes)
+     can be cleared → Done. Updated project "Frank": cleared start date.
+     Required fields can't be cleared → Customer is required, so it can't be 
+     cleared. You can change it instead, e.g. "change Frank customer to Globex".
+  2. The check in plain code (in parse_input). If the model returns provide_info
+     with fields to clear, and either no draft is open or it named a project,
+     the app treats it as an update of that project, never a new draft. If no
+     project name came back, it uses the name the model filled in (the
+     "Dresswell" that wrongly landed in customer). It also never turns a clear
+     into a new project.
+  3. Prompt: clearing works on drafts and on existing projects. Add the example
+     "clear start date of Apollo" → update, project_ref: "Apollo", clear_fields:
+     ["start_date"]. Swap the example names for neutral ones so no real name
+     gets tied to one field.
+  4. Tests: the exact failing case, clearing on update, refusing to clear
+     required fields, and corrections to a draft still working. Add clear start 
+     date of Dresswell to scripts/check_llm.py.
+  5. README: remove the "can't clear a field" limitation and add one example
+     line.
+
+  Phase 5 (research): Skip. The live test above already shows exactly what the
+  model returns.
+
+  Phase 6: Self-evaluation
+
+  ┌───────────────────────────────────────────────┬─────────────────────────┐
+  │                  Assumption                   │         Status          │
+  ├───────────────────────────────────────────────┼─────────────────────────┤
+  │ With a draft open, a clear that names a       │ Guess (it names a       │
+  │ project ("clear start date of Frank") means   │ project, so that's the  │
+  │ the existing project, not the draft           │ natural reading)        │
+  ├───────────────────────────────────────────────┼─────────────────────────┤
+  │ With a draft open, a clear without a project  │ Confirmed (keeps the    │
+  │ name ("remove the location") still applies to │ Dresswell correction    │
+  │  the draft                                    │ fix working)            │
+  ├───────────────────────────────────────────────┼─────────────────────────┤
+  │ Clearing needs no "are you sure?" step        │ Guess. It's one field,  │
+  │ (unlike delete)                               │ and it's easy to set    │
+  │                                               │ again.                  │
+  ├───────────────────────────────────────────────┼─────────────────────────┤
+  │ Your projects.json has two "Dresswell"        │ Confirmed from your     │
+  │ projects (customers Dreswell and Sara).       │ file. That's the        │
+  │ "clear start date of Dresswell" will ask      │ expected behaviour.     │
+  │ which one.                                    │                         │
+  └───────────────────────────────────────────────┴─────────────────────────┘
+
+  Error check: the plain-code check must not take over real draft corrections.
+  It only steps in when no draft is open, or when the model named a project, and
+  tests will cover both sides. I won't change your projects.json. All tests use
+  temporary files.
+
+  Best plan (ready to execute)
+
+  1. resolve_project and update_project apply clear_fields (optional fields
+     only, with a friendly refusal for required ones) → done when "clear start
+     date of Frank" clears it.
+  2. parse_input check: a clear with no draft open, or with a named project →
+     update; never create → done when the Dresswell-style model output gives
+     "which one?" or an update, never "What's the project name?".
+  3. Prompt: clearing works on existing projects, plus the new example and
+     neutral names → done when check_llm.py shows update for "clear start date
+     of Dresswell".
+  4. Tests and README → done when pytest passes and the README limitation is
+     gone.
+
+  Out of scope: Option C's fixed "clear X of Y" pattern.
+  Research status: Skipped. The live test shows the cause.
+
+  Proceed with this plan? (yes / change X / stop)
+
+✻ Churned for 55s · done 4:50 PM
+
+❯ yes go with option B                                                          
+
+⏺ Implementing Option B, starting with the current code:
+
+  Searched for 1 pattern, read 1 file (ctrl+o to expand)
+
+⏺ Update(project_agent/graph/prompts.py)
+  ⎿  Added 16 lines, removed 6 lines
+      33  Example: "rename Website Redesign to Web 2.0" -> intent update,
+           project_ref "Website Redesign",
+      34  fields.project_name "Web 2.0".
+      35 
+      36 -clear_fields: draft fields the user says are WRONG or wants REM
+         -OVED. Corrections usually                                      
+      37 -both clear a field and set another. Examples:                  
+      38 -- "Dresswell is not the project name, it's the customer" -> int
+         -ent provide_info,                                              
+      39 -  clear_fields ["project_name"], fields.customer "Dresswell".  
+      40 -- "remove the location" / "there's no start date" -> clear_fiel
+         -ds ["location"] / ["start_date"].                              
+      36 +clear_fields: fields the user says are WRONG or wants REMOVED /
+         + CLEARED / EMPTIED. This works                                 
+      37 +both for the project draft in progress AND for existing project
+         +s:                                                             
+      38 +- Clearing a field of an EXISTING project (the user names the p
+         +roject): intent update,                                        
+      39 +  project_ref = that project, clear_fields = the fields, fields
+         + all null. Examples:                                           
+      40 +  "clear start date of Apollo" -> update, project_ref "Apollo",
+         + clear_fields ["start_date"].                                  
+      41 +  "remove the notes from Northwind Launch" -> update, project_r
+         +ef "Northwind Launch",                                         
+      42 +  clear_fields ["notes"].                                      
+      43 +  The name after "of" / "from" / "on" / "for" here is the PROJE
+         +CT (project_ref), never a                                      
+      44 +  customer value.                                              
+      45 +- Correcting the DRAFT in progress (no project named): intent p
+         +rovide_info. Corrections often                                 
+      46 +  clear one field and set another. Examples:                   
+      47 +  "Northwind is not the project name, it's the customer" -> pro
+         +vide_info,                                                     
+      48 +  clear_fields ["project_name"], fields.customer "Northwind".  
+      49 +  "remove the location" / "there's no start date" -> provide_in
+         +fo, clear_fields ["location"] /                                
+      50 +  ["start_date"].                                              
+      51  Otherwise use an empty list.
+      52 
+      53  ambiguous_value: NEVER guess which field a value belongs to. If
+           the user gives a name and it is
+      44 -genuinely unclear whether it is the project name or the custome
+         -r (e.g. a bare "Dresswell"                                     
+      54 +genuinely unclear whether it is the project name or the custome
+         +r (e.g. a bare "Northwind"                                     
+      55  while the assistant is asking for BOTH), put it in ambiguous_va
+          lue and leave those fields null.
+      56  Clear cases are not ambiguous: "project Apollo" or "called Apol
+          lo" -> project_name;
+      57  "for Acme" / "client Acme" -> customer; a bare value when the a
+          ssistant asked for exactly ONE
+
+⏺ Update(project_agent/graph/nodes.py)
+  ⎿  Added 10 lines
+      136                  result["target_id"] = self._match_choice(
+      137                      (parsed.choice or "").casefold(), pending.
+           get("candidates", [])
+      138                  )
+      139 +        elif (                                                
+      140 +            route in ("provide_info", "create")               
+      141 +            and parsed.clear_fields                           
+      142 +            and (state.get("draft") is None or parsed.project_
+          +ref)                                                          
+      143 +        ):                                                    
+      144 +            # Safety net: clearing a field with no draft open 
+          +(or naming a project) can                                     
+      145 +            # only mean an EXISTING project — never start a ne
+          +w draft from it.                                              
+      146 +            parsed = self._as_clear_update(parsed)            
+      147 +            result["parsed"] = parsed.model_dump()            
+      148 +            route = "update"                                  
+      149          elif route == "provide_info" and state.get("draft") is
+            None:
+      150              # Details with no draft in progress: treat as star
+           ting a new project.
+      151              has_details = any(v for v in parsed.fields.model_d
+           ump().values())
+
+⏺ Update(project_agent/graph/nodes.py)
+  ⎿  Added 18 lines
+      160          return self._leave_pending(awaiting, pending, result)
+      161 
+      162      @staticmethod
+      163 +    def _as_clear_update(parsed: ParsedInput) -> ParsedInput: 
+      164 +        """Turn a mis-read 'clear X of <project>' into an upda
+          +te of that project.                                           
+      165 +                                                              
+      166 +        If the LLM didn't fill project_ref, the project name i
+          +t put into a field                                            
+      167 +        (e.g. customer="Dresswell") is the project being refer
+          +red to.                                                       
+      168 +        """                                                   
+      169 +        fields = parsed.fields.model_dump()                   
+      170 +        ref = parsed.project_ref                              
+      171 +        if not ref:                                           
+      172 +            for name in REQUIRED_FIELDS:                      
+      173 +                if fields.get(name):                          
+      174 +                    ref, fields[name] = fields[name], None    
+      175 +                    break                                     
+      176 +        return parsed.model_copy(                             
+      177 +            update={"intent": "update", "project_ref": ref, "f
+          +ields": ProjectFields(**fields)}                              
+      178 +        )                                                     
+      179 +                                                              
+      180 +    @staticmethod                                             
+      181      def _leave_pending(awaiting: Optional[str], pending: dict,
+            result: AgentState) -> AgentState:
+      182          """Drop a pending question the user has moved on from.
+           """
+      183          route = result.get("route")
+
+⏺ Update(project_agent/graph/nodes.py)
+  ⎿  Added 1 line
+      19      FIELD_LABELS,
+      20      REQUIRED_FIELDS,
+      21      ParsedInput,
+      22 +    ProjectFields,                                             
+      23      clean_fields,
+      24      missing_required,
+      25      normalize_id,
+
+⏺ Update(project_agent/graph/nodes.py)
+  ⎿  Added 11 lines, removed 3 lines
+      360          op = state["route"]
+      361          parsed = ParsedInput.model_validate(state["parsed"])
+      362          notes = list(state.get("notes") or [])
+      363 -        changes, problems = clean_fields(parsed.fields.model_d
+          -ump()) if op == "update" else ({}, [])                        
+      364 -        notes.extend(problems)                                
+      365 -                                                              
+      363          ref = (parsed.project_ref or "").strip()
+      364 +        changes: dict = {}                                    
+      365 +        if op == "update":                                    
+      366 +            changes, problems = clean_fields(parsed.fields.mod
+          +el_dump())                                                    
+      367 +            notes.extend(problems)                            
+      368 +            # Clearing: None means "empty this field". Require
+          +d fields can't be emptied.                                    
+      369 +            for name in parsed.clear_fields:                  
+      370 +                if name in REQUIRED_FIELDS:                   
+      371 +                    notes.append(self._cannot_clear(name, ref)
+          +)                                                             
+      372 +                elif name not in changes:                     
+      373 +                    changes[name] = None                      
+      374 +                                                              
+      375          if not ref:
+      376              return {
+      377                  "notes": notes,
+
+⏺ Update(project_agent/graph/nodes.py)
+  ⎿  Added 9 lines, removed 2 lines
+      412          if current is None:
+      413              return {"response": "That project no longer exists
+           ."}
+      414          name = current.project_name
+      415 -        changes = state.get("changes") or {}                  
+      415 +        requested = state.get("changes") or {}                
+      416 +        # Skip clears of fields that are already empty.       
+      417 +        changes = {                                           
+      418 +            k: v for k, v in requested.items() if v is not Non
+          +e or getattr(current, k) is not None                          
+      419 +        }                                                     
+      420 +        if requested and not changes:                         
+      421 +            empty = " or ".join(FIELD_LABELS[k] for k in reque
+          +sted)                                                         
+      422 +            return {"response": f'Nothing to change: "{name}" 
+          +has no {empty} set.'}                                         
+      423          if not changes:
+      424              return {
+      425                  "response": f'What would you like to change on
+            "{name}"? For example: '
+      419 -                f'"set {name} status to active" or "change {na
+          -me} location to Chiang Mai".'                                 
+      426 +                f'"set {name} status to active" or "clear star
+          +t date of {name}".'                                           
+      427              }
+      428          try:
+      429              self.repo.update(pid, changes)
+
+⏺ Update(project_agent/graph/nodes.py)
+  ⎿  Added 13 lines
+      431              return {"response": f"{exc}\nNothing was changed."
+           }
+      432          return {"response": updated_message(name, changes)}
+      433 
+      434 +    @staticmethod                                             
+      435 +    def _cannot_clear(field: str, ref: str) -> str:           
+      436 +        project = ref or "<project>"                          
+      437 +        example = (                                           
+      438 +            f'"rename {project} to <new name>"'               
+      439 +            if field == "project_name"                        
+      440 +            else f'"change {project} customer to <new customer
+          +>"'                                                           
+      441 +        )                                                     
+      442 +        return (                                              
+      443 +            f"{FIELD_LABELS[field].capitalize()} is required, 
+          +so it can't be cleared. "                                     
+      444 +            f"You can change it instead, e.g. {example}."     
+      445 +        )                                                     
+      446 +                                                              
+      447      def confirm_delete(self, state: AgentState) -> AgentState:
+      448          project = self.repo.get(state["target_id"])
+      449          if project is None:
+
+⏺ Update(project_agent/formatting.py)
+  ⎿  Added 5 lines, removed 1 line
+      72 
+      73 
+      74  def updated_message(old_name: str, changes: dict) -> str:
+      75 -    what = ", ".join(f"{FIELD_LABELS.get(k, k)} → {v}" for k, v
+         - in changes.items())                                           
+      75 +    """A value of None means the field was cleared."""         
+      76 +    what = ", ".join(                                          
+      77 +        f"cleared {FIELD_LABELS.get(k, k)}" if v is None else f
+         +"{FIELD_LABELS.get(k, k)} → {v}"                               
+      78 +        for k, v in changes.items()                            
+      79 +    )                                                          
+      80      return f'Done. Updated project "{old_name}": {what}.'
+      81 
+      82 
+⏺ Now the tests, covering the exact failing case and both sides of the new
+  check:
+
+⏺ Write(tests/test_clear_fields.py)
+  ⎿  Wrote 109 lines to tests/test_clear_fields.py
+       1 """Clearing fields of EXISTING projects ("clear start date of <p
+         roject>")."""
+       2 
+       3 import pytest
+       4 from fakes import P
+       5 
+       6 
+       7 @pytest.fixture
+       8 def seeded(repo):
+       9     repo.add({"project_name": "Frank", "customer": "Globex", "st
+     … +101 lines (~5 KB) (ctrl+o to expand)
+
+  Ran 1 shell command (ctrl+o to expand)
+
+⏺ All 69 tests pass. Next I'll re-run the live model with the new prompt. This
+  only reads what it returns and doesn't touch your data:
+
+  Ran 1 shell command (ctrl+o to expand)
+
+⏺ The live model now handles all three clearing sentences, including the
+  Dresswell one that failed before. I'll explain two re-check problems at the
+  end, then move on to the README, help text and check script. · summary
+
+  Ran 1 shell command (ctrl+o to expand)
+
+⏺ The bug is fixed: clear start date of <project> now clears that project's
+  start date and never opens a new project draft. All 69 tests pass, and the
+  live model now reads all three clearing sentences correctly.
+
+  What was wrong. There were two bugs. Updating an existing project ignored
+  clearing completely; it only worked on drafts. And the prompt's only clearing
+  example used "Dresswell" as a customer, so the model read "clear start date of
+  Dresswell" as "the customer is Dresswell". With no draft open, the app then
+  started a new project and asked for the project name.
+
+  What changed:
+  - Clearing works on existing projects:
+    - Done. Updated project "Frank": cleared start date.
+    - It can be combined with other changes in one message: status → active, 
+      cleared location.
+    - Clearing a field that's already empty says Nothing to change: "Apollo" has
+      no notes set.
+    - Project name and customer are required, so they can't be cleared. The app
+      suggests changing them instead.
+  - A check in plain code: clearing a field with no draft open, or while naming
+    a project, is always treated as an update of an existing project. If the
+    model puts the project name in the wrong field (as it did with Dresswell),
+    the app uses that name to find the project and doesn't write it into the
+    field. With a draft open, "remove the location" still corrects the draft.
+  - Prompt: it now says clearing works on existing projects too, with a "clear
+    start date of Apollo" example. The example names are now made up
+    ("Northwind"), so none of your real names get tied to one field.
+  - Tests: there's a new tests/test_clear_fields.py with 9 tests, including the
+    exact model output that caused your bug.
+  - Help text, scripts/check_llm.py and the README now cover clearing, and the
+    "can't clear a field" limitation is gone from the README.
+
+  Your projects.json has two projects named Dresswell, so clear start date of 
+  Dresswell will ask which one you mean.
+
+  Two problems from earlier fixes that the live re-check turned up. I haven't
+  fixed these yet:
+  1. A bare name is still sometimes guessed. I typed Dresswell while the app was
+     asking for both the project name and the customer. gpt-4o-mini filled it
+     in as the project name instead of asking. The check in plain code only
+     catches the two fields ending up identical, not this guess. The fix would
+     be in plain code too: if both fields are missing and the reply is just the
+     name on its own, always ask "project name or customer?".
+  2. Stray characters once got into a value. In one correction, the model
+     returned the customer as Dresswell},, with leftover brackets and
+     punctuation from the prompt. The fix is to strip those characters from the
+     start and end of every value before saving.
+
+  Both are small, fit the patterns already in the code, and would come with
+  tests. Should I fix them? (yes / change X / stop)
+
+✻ Brewed for 2m 1s · done 4:55 PM
+
+❯ yes                                                                           
+
+⏺ Fixing both now.
+
+⏺ Update(project_agent/models.py)
+  ⎿  Added 13 lines
+      164      return _STATUS_SYNONYMS.get(key)
+      165 
+      166 
+      167 +# Characters that sometimes leak from the prompt's JSON into L
+          +LM values ('Dresswell},').                                    
+      168 +# A trailing '.' is NOT stripped: it is legitimate in names li
+          +ke 'Siam Retail Co.'.                                         
+      169 +_JUNK_CHARS = ' \t\r\n"`{}[],;'                               
+      170 +                                                              
+      171 +                                                              
+      172 +def tidy_value(value: str) -> str:                            
+      173 +    """Strip stray quotes/braces/commas from both ends of an L
+          +LM-provided value."""                                         
+      174 +    value = value.strip(_JUNK_CHARS)                          
+      175 +    if len(value) >= 2 and value[0] == value[-1] == "'":  # 'A
+          +lpha' -> Alpha (keeps Macy's)                                 
+      176 +        value = value[1:-1].strip(_JUNK_CHARS)                
+      177 +    return value                                              
+      178 +                                                              
+      179 +                                                              
+      180  def clean_fields(raw: dict) -> tuple[dict, list[str]]:
+      181      """Strip/validate field values. Returns (clean_values, pro
+           blem_messages).
+      182 
+
+⏺ Update(project_agent/models.py)
+  ⎿  Added 1 line, removed 1 line
+      189          value = raw.get(name)
+      190          if value is None:
+      191              continue
+      192 -        value = str(value).strip()                            
+      192 +        value = tidy_value(str(value))                        
+      193          if not value or value.lower() in ("null", "none"):
+      194              continue
+      195          if name == "start_date":
+
+  Searched for 1 pattern, ran 1 shell command (ctrl+o to expand)
+
+⏺ Now tests for both fixes:
+
+  Ran 1 shell command (ctrl+o to expand)
+
+⏺ The test caught a small flaw: the question repeated the user's trailing period
+  ("Dresswell."). I'll use the model's cleaned value instead of the raw text:
+
+  Ran 1 shell command (ctrl+o to expand)
+
+⏺ All 75 tests pass. Finally, a full session through the real app and the live
+  model. It uses a temporary data file in the scratchpad, so your projects.json
+  isn't touched:
+
+  Ran 1 shell command (ctrl+o to expand)
+
+⏺ The full live session checks out: the bare name prompts a question, the
+  correction removes the wrong field, and the clear updates the right project.
+  Next I'm adding a README line about the new bare-name rule. · summary
+
+⏺ Update(README.md)
+  ⎿  Added 4 lines, removed 2 lines
+      144     - If the LLM can't tell which field a value belongs to, it
+           returns it as
+      145       `ambiguous_value` and the app asks *"Is 'Dresswell' the p
+           roject name or the
+      146       customer?"*.
+      147 -   - As a check that doesn't depend on the LLM, the app also a
+          -sks if the project name                                       
+      148 -     and the customer end up identical.                       
+      147 +   - As checks that don't depend on the LLM, the app also asks
+          + if the project name and                                      
+      148 +     the customer end up identical, or if your reply is *just 
+          +a name* while both are still                                  
+      149 +     unknown, even when the LLM guessed a field. Stray charact
+          +ers the LLM sometimes leaves                                  
+      150 +     in values (e.g. `Dresswell},`) are stripped before saving
+          +.                                                             
+      151     - The replies `project name`, `customer` and `both` are mat
+           ched without calling the
+      152       LLM. `both` is how you confirm a project really is named
+           after its customer.
+      153  4. The `check_required` edge routes to `ask_clarify` if a valu
+           e still needs a home. Next
+
+⏺ I've fixed both problems, and all 75 tests pass. A full session against the
+  live model works: I ran it with a temporary data file, so your projects.json
+  was not touched.
+
+  1. A bare name gets a question, never a guess. If your reply is just a name
+  (like Dresswell or Dresswell.) while both the project name and customer are
+  still unknown, the app asks "project name or customer?". This now happens even
+  when the model has already put the name into a field. The check is in plain
+  code, so it doesn't depend on the model.
+  - Fuller replies such as it's called Dresswell are still filled in directly.
+  - When only one field is missing, a bare name fills that field as before.
+
+  2. Stray characters are removed from values. Quotes, brackets, commas and
+  semicolons are stripped from the start and end of every value the model
+  returns before it's saved. So Dresswell}, becomes Dresswell. A final period is
+  kept (Siam Retail Co.), and so are apostrophes inside names (Macy's, O'Brien 
+  & Sons).
+
+  There are 6 new tests: 5 in tests/test_corrections.py and 1 in
+  tests/test_storage.py. The README's slot-filling section now mentions both
+  checks.
+
+  One new problem the live run showed. I never mentioned a status, but the model
+  added status: planned to every new project. The prompt tells it not to fill
+  in fields the user didn't give, and it does it anyway. It's harmless, but it
+  means made-up data gets saved. I can fix it in plain code the same way: only
+  keep a status if a status word actually appears in what you typed. Want me to?
+
+✻ Crunched for 1m 29s · done 4:57 PM
+
+❯ Yes.                                                                          
+  And can you add a command to delete all projects (e.g. "delete all projects"  
+  or "clear all projects") with double confirmation?                            
+
+⏺ I'll fix the status problem now, since you approved it. Deleting all projects
+  is permanent, so I'll plan that one first and check with you before building
+  it.
+
+⏺ Update(project_agent/models.py)
+  ⎿  Added 18 lines
+      157      return format_id(int(match.group(1))) if match else None
+      158 
+      159 
+      160 +# Words that show the user actually talked about status. "new"
+          + is deliberately missing:                                     
+      161 +# "new project ..." must not turn into status=planned.        
+      162 +_STATUS_WORDS = sorted(                                       
+      163 +    ({"status", "on_hold", "hold"} | set(STATUSES) | set(_STAT
+          +US_SYNONYMS)) - {"new"},                                      
+      164 +    key=len,                                                  
+      165 +    reverse=True,                                             
+      166 +)                                                             
+      167 +_STATUS_RE = re.compile(                                      
+      168 +    r"\b(" + "|".join(re.escape(w).replace(r"\ ", r"[\s_-]+") 
+          +for w in _STATUS_WORDS) + r")\b",                             
+      169 +    re.IGNORECASE,                                            
+      170 +)                                                             
+      171 +                                                              
+      172 +                                                              
+      173 +def mentions_status(text: str) -> bool:                       
+      174 +    """True if the user's own words mention a status (so the L
+          +LM didn't invent one)."""                                     
+      175 +    return bool(_STATUS_RE.search(text))                      
+      176 +                                                              
+      177 +                                                              
+      178  def normalize_status(value: str) -> Optional[str]:
+      179      key = value.strip().lower()
+      180      if key.replace(" ", "_") in STATUSES:
+
+  Ran 1 shell command (ctrl+o to expand)
+
+⏺ All 78 tests pass. Here's a quick live check with the sentence that triggered
+  the problem, again using a temporary data file:
+
+  Ran 1 shell command (ctrl+o to expand)
+
+⏺ The status fix works live. The first sentence no longer gets status: planned,
+  and the second keeps active because you said "in progress". One thing in this
+  run is intended behaviour, not a bug: Apollo picked up the open draft's
+  Bangkok and Dec 3 details, because a "new project" message joins an open draft
+  that has no name yet.
+
+  ---
+
+  Deleting all projects: plan
+
+  Exception E5 (re-entry): this is a new feature, so I'm planning only this
+  part, starting at Phase 4. Phase 5 is cut to one line because it's our own
+  code, with nothing external to look up.
+
+  Phase 4: Options for the double confirmation
+
+  Option: A. Two yes/no questions
+  What it means in practice: "Delete ALL 5 projects? (yes/no)", then "Are you
+    absolutely sure? (yes/no)"
+  Pros: Simple
+  Cons: People often type "yes, yes" on autopilot, so the second question adds
+    little safety
+  Effort: S
+  Risk: Med
+  ────────────────────────────────────────
+  Option: B. Yes, then type a phrase
+  What it means in practice: Step 1: yes. Step 2: type the exact phrase delete
+    all
+  Pros: The second step can't be answered on reflex
+  Cons: Slightly more typing
+  Effort: S
+  Risk: Low
+  ────────────────────────────────────────
+  Option: C. B + automatic backup
+  What it means in practice: Same as B, plus a copy of the file is saved
+    before wiping, e.g. projects.before-delete-all-20261121-1730.bak
+  Pros: You can recover from a mistake by renaming the file back
+  Cons: One extra file per wipe (kept out of git)
+  Effort: S
+  Risk: Low
+
+  Recommendation
+
+  Choose Option C. This is the only permanent action that wipes everything, and
+  a typed phrase plus a backup costs about 10 lines. If you don't want backup
+  files appearing in the folder, choose B.
+
+  How it would work:
+  > delete all projects
+  This will permanently delete ALL 5 projects:
+  1. Summer Lookbook — customer: Dresswell · location: Bangkok
+  2. ...
+  Are you sure? Type "yes" to continue or "no" to cancel.
+  > yes
+  Last check: type "delete all" to confirm.
+  > delete all
+  Done. Deleted all 5 projects. (A backup was saved to 
+  projects.before-delete-all-20261121-1730.bak.)
+  - How the command is recognised:
+    - Exact phrases skip the model: delete all projects, clear all projects,
+      remove all projects, delete all, clear all.
+    - Other wordings ("wipe every project") use a new model intent, delete_all.
+    - Either way, the same two confirmations follow.
+  - Anything other than the expected answer cancels, at either step: "OK,
+    nothing was deleted." It works like single delete: a different command typed
+    instead is run as normal, and a later stray yes deletes nothing.
+  - When there's nothing to delete: "You don't have any projects to delete."
+  - The draft you're working on is not touched.
+
+  Phase 5 (research): Skip. This is local code and storage.
+
+  Phase 6: Self-evaluation
+
+  ┌─────────────────────────────────────────┬───────────────────────────────┐
+  │               Assumption                │            Status             │
+  ├─────────────────────────────────────────┼───────────────────────────────┤
+  │ "delete all" / "clear all" mean all     │ Guess (that's what you        │
+  │ projects, not "cancel my draft"         │ described)                    │
+  ├─────────────────────────────────────────┼───────────────────────────────┤
+  │ An unfinished draft survives deleting   │ Guess. It isn't saved yet, so │
+  │ all projects                            │  it's not "a project".        │
+  ├─────────────────────────────────────────┼───────────────────────────────┤
+  │ Internal ID numbers keep counting up    │ Confirmed (same rule as       │
+  │ after a wipe and aren't reused          │ single delete; IDs are hidden │
+  │                                         │  anyway)                      │
+  ├─────────────────────────────────────────┼───────────────────────────────┤
+  │ The confirm list shows every project.   │                               │
+  │ Above 10, it shows the first 10 and     │ Guess                         │
+  │ "…and N more".                          │                               │
+  └─────────────────────────────────────────┴───────────────────────────────┘
+
+  Error check:
+  - Risk: the model reading "delete Alpha" as delete_all. Both confirmations,
+    the full count shown and the typed phrase protect against this. A test will
+    cover it.
+  - Risk: the backup write fails. Then the wipe is stopped and nothing is
+    deleted.
+  - Edge case: clear on its own still means "cancel" (no change). Only clear all
+    or clear all projects wipes.
+  - I won't touch your real projects.json. All tests use temporary files.
+
+  Best plan (ready to execute)
+
+  1. Storage: delete_all() writes a backup first, then empties the list, and
+     never wipes if the backup fails → done when a storage test shows the backup
+     has all the projects and the list is empty.
+  2. Schema and prompt: a delete_all intent, plus exact-phrase matching in
+     parse_input → done when both kinds of input lead to the first confirmation.
+  3. Graph: a new confirm_delete_all step with two stages (yes, then delete 
+     all); anything else cancels → done when delete all / yes / delete all
+     wipes, and every other path leaves the data intact.
+  4. Tests: the full path, cancel at each step, a new command mid-confirmation,
+     a stray yes later, an empty list, the draft kept, and a backup failure →
+     done when pytest passes.
+  5. Help text, .gitignore for backups, and the README (feature list plus one
+     example) → done when the docs match.
+
+  Out of scope: an "undo" command. Restoring from a backup is a manual rename,
+  which the README will explain.
+  Research status: Skipped. Local code only.
+
+  Proceed with this plan? (yes / change X / stop)
+
+✻ Worked for 1m 5s · done 4:59 PM
+❯ Go with option B                                                              
+
+⏺ Going with Option B: two confirmations (yes, then the typed phrase delete 
+  all), no backup file. Let me look at the top of parse_input, where the new
+  confirmation step goes:
+
+  Read 1 file, ran 1 shell command (ctrl+o to expand)
+
+⏺ The existing 78 tests still pass. One improvement: if someone types yes at the
+  final step, the cancel message should say why nothing happened. Then I'll
+  write the delete-all tests:
+
+⏺ Update(project_agent/graph/nodes.py)
+  ⎿  Added 4 lines, removed 1 line
+      576          return {**cleared, "response": f"Done. Deleted all {co
+           unt} {noun}."}
+      577 
+      578      def cancel_delete_all(self, state: AgentState) -> AgentSta
+           te:
+      579 -        return {"awaiting": None, "pending_op": None, "respons
+          -e": "OK, nothing was deleted."}                               
+      579 +        message = "OK, nothing was deleted."                  
+      580 +        if (state.get("pending_op") or {}).get("stage") == 2: 
+      581 +            message += f' (The last step needs the exact words
+          + "{DELETE_ALL_PHRASE}".)'                                     
+      582 +        return {"awaiting": None, "pending_op": None, "respons
+          +e": message}                                                  
+      583 
+      584      def cancel_delete(self, state: AgentState) -> AgentState:
+      585          label = (state.get("pending_op") or {}).get("label", "
+           the project")
+
+⏺ Write(tests/test_delete_all.py)
+  ⎿  Wrote 138 lines to tests/test_delete_all.py
+       1 """'delete all projects' with double confirmation: "yes", then t
+         he exact phrase."""
+       2 
+       3 import pytest
+       4 from fakes import P
+       5 
+       6 from project_agent.storage import ProjectRepository, StorageErro
+         r
+       7 
+       8 
+     … +130 lines (ctrl+o to expand)
+
+  Ran 1 shell command (ctrl+o to expand)
+
+⏺ One test failed because my plan wrongly said a bare clear still means cancel,
+  when it is passed to the model like any other sentence. I'm fixing the test to
+  check that a bare clear never starts a wipe. · summary
+
+⏺ Update(tests/test_delete_all.py)
+  ⎿  Added 5 lines, removed 4 lines
+      48      assert "permanently delete ALL 2 projects" in bot.handle("w
+          ipe out every single project")
+      49 
+      50 
+      51 -def test_plain_clear_still_means_cancel(bot, parser, seeded):  
+      52 -    parser.script["new project Zeus"] = P("create", project_nam
+         -e="Zeus")                                                      
+      53 -    bot.handle("new project Zeus")                             
+      54 -    assert "discarded the unfinished project" in bot.handle("cl
+         -ear")                                                          
+      51 +def test_plain_clear_does_not_start_delete_all(bot, parser, see
+         +ded):                                                          
+      52 +    """Only 'clear all' / 'clear all projects' wipe; a bare 'cl
+         +ear' goes to the LLM as usual."""                              
+      53 +    reply = bot.handle("clear")                                
+      54 +    assert "permanently delete" not in reply                   
+      55 +    assert bot.state.get("awaiting") is None                   
+      56      assert len(seeded.list_all()) == 2
+      57 
+      58 
+
+  Ran 1 shell command (ctrl+o to expand)
+
+⏺ All 95 pass. Here's a live run of the whole flow, including a wording that
+  only the model can recognise, on a temporary data file:
+
+  Ran 1 shell command (ctrl+o to expand)
+
+⏺ Delete-all works live, including the model-only wording and the "yes twice
+  isn't enough" case. Now the README:
+
+  Ran 2 shell commands (ctrl+o to expand)
+
+⏺ The diagram I added wrongly chains the delete-all steps together, so I'm
+  redrawing it as four separate routes. · summary
+
+  Ran 1 shell command (ctrl+o to expand)
+
+⏺ Both changes are in, and all 95 tests pass. I also checked each one live,
+  using a temporary data file so your projects.json wasn't touched.
+
+  1. The model can no longer invent a status. A status is kept only if your own
+  words mention one, like "active", "in progress", "on hold", "done" or
+  "status". "New project" doesn't count, so it can't turn into planned. Live,
+  "Start a new project in Bangkok" no longer gets status: planned, and "it's in
+  progress" still gives active. There are 3 new tests.
+
+  2. Delete all projects, with two confirmations:
+  > delete all projects
+  This will permanently delete ALL 2 projects:
+  1. Alpha — customer: Acme
+  2. Beta — customer: Globex · status: active
+  Are you sure? Type "yes" to continue or "no" to cancel.
+  > yes
+  Last check: type "delete all" to confirm. Anything else cancels.
+  > delete all
+  Done. Deleted all 2 projects.
+  - How it starts:
+    - delete all projects, clear all projects, remove all projects, delete all
+      and clear all are recognised without calling the model.
+    - Other wordings go to the model. Live, "please wipe out every project I
+      have" worked.
+    - A bare clear never starts it.
+  - It's hard to wipe by accident:
+    - Typing yes twice cancels, with a note that the last step needs the exact
+      words delete all.
+    - Any other answer at either step cancels. If that answer was a different
+      command, it runs as normal.
+    - A stray yes afterwards deletes nothing.
+  - What's kept:
+    - If the model mistakes "delete Alpha" for delete-all, you still see the
+      full count and list, and both confirmations.
+    - Your unfinished draft is kept.
+    - If saving fails, nothing is deleted.
+  - What it shows: if you have no projects you'll get "You don't have any
+    projects to delete.", and lists over 10 projects show the first 10, then
+    "…and N more".
+  - Undo: as you chose (Option B), there's no backup file, so a wipe can't be
+    undone.
+
+  The new tests are in tests/test_delete_all.py (16 tests). The help text and
+  README are updated, with a new example session and the graph diagram.
+
+  A correction to my plan. I wrote that a bare clear "still means cancel". It
+  never did. clear alone goes to the model like any other sentence, and the test
+  now checks only what matters: it never starts a wipe.
+
+  Another invented value from the live run. Alpha and Beta were saved with
+  start: 2026-11-21 (today), but I never gave a date. It's the same problem as
+  the status. The model fills in today's date even though the prompt tells it
+  not to. I can fix it the same way: only keep a start date if your words
+  mention a date, such as a number, a month or weekday name, or "today",
+  "tomorrow" or "next". Should I?
+
+✻ Cogitated for 2m 8s · done 5:03 PM
+
+❯ yes                                                                           
+
+⏺ Adding the same plain-code check for start dates:
+
+⏺ Update(project_agent/models.py)
+  ⎿  Added 31 lines
+      176      return bool(_STATUS_RE.search(text))
+      177 
+      178 
+      179 +_MONTHS = (                                                   
+      180 +    "january february march april may june july august septemb
+          +er october november december "                                
+      181 +    "jan feb mar apr jun jul aug sep sept oct nov dec"        
+      182 +).split()                                                     
+      183 +_WEEKDAYS = (                                                 
+      184 +    "monday tuesday wednesday thursday friday saturday sunday 
+          +"                                                             
+      185 +    "mon tue tues wed thu thur thurs fri sat sun"             
+      186 +).split()                                                     
+      187 +_RELATIVE = (                                                 
+      188 +    "today tomorrow tonight yesterday next week weekend month 
+          +year now asap immediately "                                   
+      189 +    "date day days"                                           
+      190 +).split()                                                     
+      191 +_ORDINALS = (                                                 
+      192 +    "first second third fourth fifth sixth seventh eighth nint
+          +h tenth eleventh twelfth "                                    
+      193 +    "thirteenth fourteenth fifteenth sixteenth seventeenth eig
+          +hteenth nineteenth twentieth "                                
+      194 +    "thirtieth"                                               
+      195 +).split()                                                     
+      196 +_DATE_RE = re.compile(                                        
+      197 +    r"\d|\b(" + "|".join(_MONTHS + _WEEKDAYS + _RELATIVE + _OR
+          +DINALS) + r")\b",                                             
+      198 +    re.IGNORECASE,                                            
+      199 +)                                                             
+      200 +                                                              
+      201 +                                                              
+      202 +def mentions_date(text: str) -> bool:                         
+      203 +    """True if the user's own words could contain a date (so t
+          +he LLM didn't invent one).                                    
+      204 +                                                              
+      205 +    Deliberately generous: any digit counts, so a real date is
+          + never thrown away.                                           
+      206 +    """                                                       
+      207 +    return bool(_DATE_RE.search(text))                        
+      208 +                                                              
+      209 +                                                              
+      210  def normalize_status(value: str) -> Optional[str]:
+      211      key = value.strip().lower()
+      212      if key.replace(" ", "_") in STATUSES:
+
+  Ran 1 shell command (ctrl+o to expand)
+
+⏺ A test caught a regression: "someday" was being silently dropped instead of
+  explained, so I'm restricting the dropping to valid dates you never mentioned.
+  · summary
+
+  Ran 1 shell command (ctrl+o to expand)
+
+⏺ Now a live check with the sentences from last time, plus a few that should
+  keep their dates:
+
+  Ran 1 shell command (ctrl+o to expand)
+
+⏺ Alpha and Beta no longer get a made-up date, and real dates are kept. But
+  "next Monday" came back as 2026-11-28, which looks wrong. Let me check the
+  weekdays:
+
+  Ran 1 shell command (ctrl+o to expand)
+
+⏺ The model got "next Monday" wrong as a Saturday despite today's date in the
+  prompt, which I've noted as a separate bug for later. I'm updating the README
+  for the start-date check next. · summary
+
+  Ran 1 shell command (ctrl+o to expand)
+
+⏺ I've fixed it: the model can no longer save today's date as a start date when
+  you didn't give one. All 102 tests pass.
+
+  How it works. A start date is kept only if your own words could contain a
+  date: any digit, a month or weekday name ("Dec", "Fri"), "today", "tomorrow",
+  "next", "week", or an ordinal like "fifteenth". Short forms only count as
+  whole words, so names like "Monitoring" or "Saturnine" don't count as
+  weekdays.
+
+  Two side effects:
+  - A date that can't be read is kept. "Starting someday" still gets the
+    "couldn't read 'someday' as a date" explanation instead of disappearing. A
+    value the model couldn't turn into a date came from your words, not from the
+    model.
+  - The check is generous on purpose, so it can miss some made-up dates. A
+    project name with a number in it ("Apollo 11 for NASA") would let a made-up
+    date through. I chose that over the opposite risk of throwing away a date
+    you actually gave.
+
+  Live check (temporary data file, your projects.json untouched): Alpha and Beta
+  no longer get a start date, and "Dec 3" and "next Monday" are kept. There are
+  9 new tests in tests/test_corrections.py, and the README now explains this
+  check.
+
+  A new problem from the same run: the model gets relative dates wrong. Today is
+  Saturday 2026-11-21, and "starting next Monday" was saved as 2026-11-28,
+  which is a Saturday. The prompt does give the model today's date and weekday,
+  but it still miscounted. A start date from words like "next Monday" or "in 2
+  weeks" can be off by days, with no warning.
+
+  The fix I'd suggest: have the model also return your exact date words (e.g.
+  "next Monday"). The app would then work out common phrases itself: today,
+  tomorrow, weekdays, "next/this <weekday>", and "in N days/weeks". It would
+  fall back to the model's date only for anything else. One choice comes with
+  it: does "next Monday" mean the 23rd (the coming Monday) or the 30th (Monday
+  of next week)? I'd go with the 23rd and show the resolved date in the reply,
+  which it already does.
+
+  Should I go ahead with that? (yes / change X / stop)
+
+✻ Sautéed for 1m 39s · done 5:33 PM
+
+❯ yes                                                                           
+
+⏺ Building it now: the model also returns your exact date words, and the app
+  works out the common phrases itself.
+⏺ Write(project_agent/dates.py)
+  ⎿  Wrote 77 lines to project_agent/dates.py
+       1 """Resolve common relative date phrases in plain code (LLMs misc
+         ount weekdays).
+       2 
+       3 Rules (today = the reference date):
+       4 - "today" / "tonight" / "now"            -> today
+       5 - "tomorrow" / "day after tomorrow"      -> +1 / +2 days
+       6 - "<weekday>", "next <weekday>", "coming <weekday>"
+       7                                          -> the next such day AF
+         TER today (never today)
+       8 - "this <weekday>"                       -> today if it is that
+     … +70 lines (~3 KB) (ctrl+o to expand)
+
+  Searched for 1 pattern, ran 1 shell command (ctrl+o to expand)
+
+⏺ The existing 102 tests still pass. Now tests for the date resolver and how it
+  plugs into the graph:
+
+  Ran 1 shell command (ctrl+o to expand)
+
+⏺ All 128 tests pass. Now the live check with the same sentence that failed
+  before (temporary data file):
+
+  Ran 1 shell command (ctrl+o to expand)
+
+⏺ "Starting in two weeks" lost its date because my new check only knew "week",
+  not "weeks", so I'm adding the plural forms and a test for them. · summary
+
+  Ran 1 shell command (ctrl+o to expand)
+
+⏺ Every date is right now. From Saturday 2026-11-21: next Monday → 23rd (a
+  Monday), Dec 3 → Dec 3, in two weeks → Dec 5, tomorrow → 22nd, this Friday →
+  27th (a Friday). Last step, the README:
+
+  Ran 1 shell command (ctrl+o to expand)
+
+⏺ Relative dates are now worked out in code instead of by the model, and all 130
+  tests pass. In a live run that started from Saturday 2026-11-21, every date
+  came out right:
+
+  ┌───────────────────────┬─────────────────────────────────────────────────┐
+  │       You typed       │                    Saved as                     │
+  ├───────────────────────┼─────────────────────────────────────────────────┤
+  │ starting next Monday  │ 2026-11-23 (Monday). It was 2026-11-28, a       │
+  │                       │ Saturday, before.                               │
+  ├───────────────────────┼─────────────────────────────────────────────────┤
+  │ starting tomorrow     │ 2026-11-22                                      │
+  ├───────────────────────┼─────────────────────────────────────────────────┤
+  │ starting in two weeks │ 2026-12-05                                      │
+  ├───────────────────────┼─────────────────────────────────────────────────┤
+  │ move start to this    │ 2026-11-27 (Friday)                             │
+  │ Friday                │                                                 │
+  ├───────────────────────┼─────────────────────────────────────────────────┤
+  │ kick-off Dec 3        │ 2026-12-03 (the model's date, as before)        │
+  └───────────────────────┴─────────────────────────────────────────────────┘
+
+  How it works
+  - The model now also returns your exact date words, like "next Monday".
+  - A new file, project_agent/dates.py, works out these phrases from today's
+    date: today, tomorrow, "the day after tomorrow", a weekday name on its own,
+    "this/next/coming <weekday>", "in N days/weeks", and "N days from now".
+    Numbers can be digits or words ("in two weeks").
+  - "Next Monday" means the coming Monday. A weekday on its own never means
+    today. "This Saturday" on a Saturday means today.
+  - Anything else ("Dec 3", "end of March", "next month") still uses the model's
+    date.
+  - If the model returns date words you never typed, they're ignored and the
+    model's date is used.
+
+  Fixed along the way. The live run found a hole in the start-date check from my
+  previous change: "starting in two weeks" was being dropped as a made-up date.
+  The word list had "week" but not "weeks". I added the plurals (weeks, months,
+  years, weekends) and "fortnight", with tests for that case.
+
+  There are 28 new tests: 26 in tests/test_dates.py, including the exact wrong
+  answer the model gave, and 2 in tests/test_corrections.py.
+  scripts/check_llm.py now prints the date words the model returns, and the
+  README explains the date rules.
+
+  Limitation: "next week" and "next month" with no day still use the model's
+  date. They're vague, so there's no clear right answer to calculate. If you
+  want fixed rules for them (e.g. next week = the coming Monday, next month =
+  the 1st), I can add those.
+
+✻ Baked for 2m 2s · done 5:36 PM
+
+※ recap: You're building a console app for managing projects with a language model. The latest fix works out relative dates like "next Monday" in code, and all 130 tests pass. Next, decide whether "next week" and "next month" should get fixed rules too.
+
+❯ Still doesn't save with correct start date.                                   
+  > create a new project call Apollo 13 that kick-off next Friday               
+  Got it (project name: Apollo 13, start date: 2026-11-25)                      
+
+⏺ I'll reproduce it with the live model to see what it returns for that exact
+  sentence. This is read-only: no data changes.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+⏺ The model's output checks out: it returns "next Friday", and my resolver maps
+  that to 2026-11-27. So the fault lies between those two steps, and I'm running
+  your exact sentence through the full app next. · summary
+
+  Ran 1 shell command (ctrl+o to expand)
+
+⏺ The current code produces the correct date, but an older app instance (process
+  1798, started 5:26 PM) is still running, so I'm checking whether it predates
+  the date fix. · summary
+
+  Ran 1 shell command (ctrl+o to expand)
+
+⏺ The fix works. The wrong date came from an older copy of the app that was
+  still running.
+
+  - Your app session (process 1798) started at 17:26:26.
+  - The date fix (project_agent/dates.py) was saved at 17:35:06.
+
+  Python loads the code once when the app starts, so that session is still
+  running the version without the fix. It's the model alone counting dates, and
+  it got next Friday wrong: 2026-11-25 is a Wednesday.
+
+  The current code gets your exact sentence right. I sent it to the live model
+  several times, using a temporary data file:
+  > create a new project call Apollo 13 that kick-off next Friday
+  Got it (project name: Apollo 13, start date: 2026-11-27). Who is the customer?
+  2026-11-27 is the coming Friday (today is Saturday the 21st). In 1 of 3 tries,
+  the model on its own again said 2026-11-25, and the app replaced it with the
+  correct date.
+
+  To fix it: type exit in that app window, then start it again with python 
+  main.py. Any unfinished draft in that session will be lost, but saved projects
+  are safe in projects.json.
+
+  I didn't stop process 1798 myself, because it's your session. No code change
+  was needed.
+
+✻ Sautéed for 46s · done 5:51 PM
+
+※ recap: We're building your console project assistant, and the last check found that the date fix works; your open app session started before the fix was saved. Next, type exit in that window and restart it with python main.py.
