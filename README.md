@@ -20,9 +20,9 @@ Built with **LangChain** + **LangGraph**, using a cloud LLM through **OpenRouter
 - **Get**, **update** (including clearing optional fields, e.g. *"clear start date of
   Alpha"*) and **delete** a project by name. If a name matches
   several projects, the app asks which one. **Deleting always needs an explicit `yes`.**
-- **Delete all projects** (*"delete all projects"*, *"clear all projects"*) with a double
-  confirmation: first `yes`, then type the exact words `delete all`. Any other answer at
-  either step cancels, and nothing is deleted. There is no undo.
+- **Delete all projects** (*"delete all projects"*, *"clear all projects"*) with one
+  confirmation: type the exact words `delete all`. Any other answer (even `yes`) cancels,
+  and nothing is deleted. There is no undo.
 - Unclear input, network or API failures, and a damaged data file all get a friendly
   message. The app does not crash.
 
@@ -171,9 +171,9 @@ START → parse_input ──┬─ create / provide_info → merge_draft ─┬�
   calling the LLM, so they work even when the API is down.
 - Delete always asks first. Only `yes`/`y`/`confirm` deletes. Anything else keeps the
   project, and a new command typed instead is run as normal.
-- Delete-all asks twice (`yes`, then the exact phrase `delete all`). The fixed phrases
-  and both confirmation steps are handled in plain code, so a misread by the model can
-  never wipe data on its own.
+- Delete-all asks you to type the exact phrase `delete all` (a plain `yes` is not enough).
+  The fixed phrases and the confirmation are handled in plain code, so a misread by the
+  model can never wipe data on its own.
 - A status or start date is kept only if your own words mention one (a status word;
   a number, month, weekday, "today", "tomorrow", "next"…). So the model can't invent
   `status: planned` or quietly use today's date.
@@ -270,51 +270,65 @@ Delete project "Office Fit-out" (customer: Siam Retail Co.)? This cannot be undo
 Done. Deleted project "Office Fit-out".
 ```
 
-### Session 3: an ambiguous name, and correcting a mistake
+### Session 3: two projects with the same name
+
+Duplicate names are allowed. The app warns you when you create one, and asks "which one?"
+whenever a name matches more than one project.
 
 ```text
-> Start a new project in Bangkok
-Got it (location: Bangkok). What's the project name, and who is the customer?
+> new project Website Redesign for Acme
+Done. Created project "Website Redesign" for customer Acme.
 
-> Dresswell
-Got it (location: Bangkok). Is "Dresswell" the project name or the customer? (Reply "project name", "customer", or "both".)
+> new project Website Redesign for Globex in Bangkok
+Done. Created project "Website Redesign" for customer Globex (location: Bangkok).
+Note: you now have more than one project named "Website Redesign".
 
-> customer
-Got it (location: Bangkok, customer: Dresswell). What's the project name?
+> list
+Here are your projects (2):
+1. Website Redesign — customer: Acme
+2. Website Redesign — customer: Globex · location: Bangkok
 
-> Summer Lookbook
-Done. Created project "Summer Lookbook" for customer Dresswell (location: Bangkok).
+> mark Website Redesign as active
+I found 2 projects matching "Website Redesign":
+1. Website Redesign — customer: Acme
+2. Website Redesign — customer: Globex · location: Bangkok
+Which one do you want to update? (reply with the number)
 
-> new project Dresswell
-Got it (project name: Dresswell). Who is the customer?
+> 1
+Done. Updated project "Website Redesign": status → active.
 
-> Dresswell is not the project name, it's the customer
-Removed project name "Dresswell".
-Got it (customer: Dresswell). What's the project name?
+> delete Website Redesign
+I found 2 projects matching "Website Redesign":
+1. Website Redesign — customer: Acme · status: active
+2. Website Redesign — customer: Globex · location: Bangkok
+Which one do you want to delete? (reply with the number)
 
-> Autumn Campaign
-Done. Created project "Autumn Campaign" for customer Dresswell.
+> 2
+Delete project "Website Redesign" (customer: Globex)? This cannot be undone. Type "yes" or "no".
+
+> yes
+Done. Deleted project "Website Redesign".
+
+> list
+Here are your projects (1):
+1. Website Redesign — customer: Acme · status: active
 ```
 
-### Session 4: deleting all projects (double confirmation)
+### Session 4: deleting all projects (typed confirmation)
 
 ```text
 > delete all projects
 This will permanently delete ALL 2 projects:
 1. Alpha — customer: Acme
 2. Beta — customer: Globex · status: active
-Are you sure? Type "yes" to continue or "no" to cancel.
+Type "delete all" to confirm. Anything else cancels.
 
 > yes
-Last check: type "delete all" to confirm. Anything else cancels.
-
-> yes
-OK, nothing was deleted. (The last step needs the exact words "delete all".)
+OK, nothing was deleted. (Confirming needs the exact words "delete all".)
 
 > delete all projects
 ...
-> yes
-Last check: type "delete all" to confirm. Anything else cancels.
+Type "delete all" to confirm. Anything else cancels.
 
 > delete all
 Done. Deleted all 2 projects.

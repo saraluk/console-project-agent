@@ -74,6 +74,8 @@ The main prompts I wrote, in order:
    > Yes. And can you add a command to delete all projects (e.g. "delete all projects" or "clear all projects") with double confirmation?
 
    Follow-up: `Go with option B` (confirm with yes, then type the phrase `delete all`).
+   Later simplified:
+   > for delete all path, I think we just do one confirmation that require user the type "delete all"
 
 9. **Bug report: wrong relative start date**
    > Still doesn't save with correct start date.

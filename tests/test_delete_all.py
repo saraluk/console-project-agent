@@ -1,4 +1,4 @@
-"""'delete all projects' with double confirmation: "yes", then the exact phrase."""
+"""'delete all projects' with one confirmation: the user must type the exact phrase."""
 
 import pytest
 from fakes import P
@@ -23,12 +23,9 @@ def test_full_path_deletes_everything(bot, parser, seeded, tmp_path):
         "This will permanently delete ALL 2 projects:\n"
         "1. Alpha — customer: Acme\n"
         "2. Beta — customer: Globex · status: active\n"
-        'Are you sure? Type "yes" to continue or "no" to cancel.'
+        'Type "delete all" to confirm. Anything else cancels.'
     )
     assert len(seeded.list_all()) == 2
-
-    assert bot.handle("yes") == 'Last check: type "delete all" to confirm. Anything else cancels.'
-    assert len(seeded.list_all()) == 2  # still nothing deleted after the first yes
 
     assert bot.handle("delete all") == "Done. Deleted all 2 projects."
     assert seeded.list_all() == []
@@ -56,27 +53,26 @@ def test_plain_clear_does_not_start_delete_all(bot, parser, seeded):
     assert len(seeded.list_all()) == 2
 
 
-def test_no_at_first_step_cancels(bot, seeded):
+def test_no_cancels(bot, seeded):
     _first_prompt(bot)
     assert bot.handle("no") == "OK, nothing was deleted."
     assert len(seeded.list_all()) == 2
     assert bot.state["awaiting"] is None
 
 
-def test_yes_twice_is_not_enough(bot, seeded):
+@pytest.mark.parametrize("answer", ["yes", "y", "confirm"])
+def test_yes_is_not_enough(bot, seeded, answer):
     _first_prompt(bot)
-    bot.handle("yes")
-    reply = bot.handle("yes")
-    assert reply == 'OK, nothing was deleted. (The last step needs the exact words "delete all".)'
+    reply = bot.handle(answer)
+    assert reply == 'OK, nothing was deleted. (Confirming needs the exact words "delete all".)'
     assert len(seeded.list_all()) == 2
-    # And a later "delete all" starts over from the first question instead of wiping.
-    assert "Are you sure?" in bot.handle("delete all")
+    # And a later "delete all" starts over from the question instead of wiping.
+    assert "permanently delete ALL 2 projects" in bot.handle("delete all")
     assert len(seeded.list_all()) == 2
 
 
-def test_wrong_phrase_at_last_step_cancels(bot, parser, seeded):
+def test_wrong_phrase_cancels(bot, parser, seeded):
     _first_prompt(bot)
-    bot.handle("yes")
     reply = bot.handle("delete everything")  # not the exact phrase
     assert reply.startswith("OK, nothing was deleted.")
     assert len(seeded.list_all()) == 2
@@ -107,7 +103,6 @@ def test_draft_survives_and_is_reminded(bot, parser, seeded):
     parser.script["new project Zeus"] = P("create", project_name="Zeus")
     bot.handle("new project Zeus")
     _first_prompt(bot)
-    bot.handle("yes")
     reply = bot.handle("delete all")
     assert reply.startswith("Done. Deleted all 2 projects.")
     assert 'unfinished project "Zeus", missing: customer' in reply
@@ -127,7 +122,6 @@ def test_storage_failure_deletes_nothing(bot, seeded, monkeypatch):
         raise StorageError("Could not save to projects.json: disk full")
 
     _first_prompt(bot)
-    bot.handle("yes")
     monkeypatch.setattr(seeded, "_save", boom)
     reply = bot.handle("delete all")
     assert "disk full" in reply and "Nothing was deleted." in reply

@@ -15,8 +15,7 @@ PARSE_ROUTES = {
     "update": "resolve_project",
     "delete": "resolve_project",
     "delete_all": "start_delete_all",
-    "delete_all_yes": "confirm_delete_all",  # step 1 passed -> ask for the phrase
-    "delete_all_confirmed": "delete_all_projects",  # step 2 passed
+    "delete_all_confirmed": "delete_all_projects",  # exact phrase typed
     "delete_all_no": "cancel_delete_all",
     "choose": "resolve_project",
     "confirm_yes": "delete_project",

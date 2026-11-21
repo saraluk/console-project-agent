@@ -62,7 +62,7 @@ Here's what I can do (just type normally):
   • Update:  "set Website Redesign status to active"
   • Clear:   "clear start date of Website Redesign"
   • Delete:  "delete Website Redesign" (I'll always ask you to confirm)
-  • Delete all: "delete all projects" (asks twice: "yes", then type "delete all")
+  • Delete all: "delete all projects" (asks you to type "delete all" to confirm)
   • cancel:  abandon an unfinished project or pending question
   • quit / exit: leave the app
 Required for a new project: project name and customer.
@@ -113,12 +113,9 @@ class Nodes:
             out.update(awaiting=None, pending_op=None)
             awaiting, pending = None, {}
 
-        # --- Delete-ALL confirmation (two steps). Only the exact answers move forward.
+        # --- Delete-ALL confirmation: only the exact phrase deletes. Anything else cancels.
         if awaiting == "confirm_delete_all":
-            stage = pending.get("stage", 1)
-            if stage == 1 and low in YES_WORDS:
-                return {"route": "delete_all_yes"}
-            if stage == 2 and low == DELETE_ALL_PHRASE:
+            if low == DELETE_ALL_PHRASE:
                 return {"route": "delete_all_confirmed"}
             if low in YES_WORDS | NO_WORDS:
                 return {"route": "delete_all_no"}
@@ -590,18 +587,9 @@ class Nodes:
         noun = "project" if len(projects) == 1 else "projects"
         return {
             "awaiting": "confirm_delete_all",
-            "pending_op": {"op": "delete_all", "stage": 1, "count": len(projects)},
+            "pending_op": {"op": "delete_all", "count": len(projects)},
             "response": f"This will permanently delete ALL {len(projects)} {noun}:\n{lines}\n"
-            "Are you sure? Type \"yes\" to continue or \"no\" to cancel.",
-        }
-
-    def confirm_delete_all(self, state: AgentState) -> AgentState:
-        pending = {**(state.get("pending_op") or {}), "stage": 2}
-        return {
-            "awaiting": "confirm_delete_all",
-            "pending_op": pending,
-            "response": f'Last check: type "{DELETE_ALL_PHRASE}" to confirm. '
-            "Anything else cancels.",
+            f'Type "{DELETE_ALL_PHRASE}" to confirm. Anything else cancels.',
         }
 
     def delete_all_projects(self, state: AgentState) -> AgentState:
@@ -615,8 +603,8 @@ class Nodes:
 
     def cancel_delete_all(self, state: AgentState) -> AgentState:
         message = "OK, nothing was deleted."
-        if (state.get("pending_op") or {}).get("stage") == 2:
-            message += f' (The last step needs the exact words "{DELETE_ALL_PHRASE}".)'
+        if state.get("user_input", "").strip().casefold().rstrip(".!") in YES_WORDS:
+            message += f' (Confirming needs the exact words "{DELETE_ALL_PHRASE}".)'
         return {"awaiting": None, "pending_op": None, "response": message}
 
     def cancel_delete(self, state: AgentState) -> AgentState:
